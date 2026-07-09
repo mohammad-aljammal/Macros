@@ -37,16 +37,21 @@ them.
 
 ## AI features (optional)
 
-AI drafting, tone rewriting, translation, and policy ingestion use the
-Gemini API key hardcoded near the top of `index.html`
-(`const GEMINI_API_KEY = ...`).
+AI drafting, tone rewriting, translation, and policy ingestion use the Gemini
+API. Nothing is hardcoded in `index.html` — open the app, click **⚙️ Settings**,
+and paste a key into the **AI (Gemini) Key** card. Get a free key at
+[aistudio.google.com/apikey](https://aistudio.google.com/apikey).
 
-**Security note:** this key is visible to anyone who views this page's
-source, since it's a static, client-side file. If this repo or its GitHub
-Pages site is public, treat the key as public too — set a billing alert
-and/or restrictions on it in Google Cloud Console, and rotate it if you ever
-suspect misuse. For real protection, the key would need to move behind a
-small backend proxy instead of being called directly from the browser.
+The key is stored only in that browser's `localStorage`. It is never written
+into `index.html`, never committed to this repo, and never included in
+**Backup JSON** exports — so it can't leak through git history or GitHub's
+public secret scanning the way a hardcoded key would. It's local to whichever
+browser/device you enter it on; enter it again on each device you use.
+
+If you ever paste a key into a *hardcoded* copy of this file and push it to a
+public GitHub repo, assume it will be auto-detected and revoked by Google
+within minutes — GitHub's secret scanning partner program actively watches
+public repos for exactly this. Keep using the Settings field instead.
 
 ## Backup & restore
 

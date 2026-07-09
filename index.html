@@ -291,9 +291,16 @@
    embedding any Gemini key (standard or auth) in client-side code for exactly
    this reason. If this page is ever hosted publicly, rotate this key and set
    a billing alert / IP restriction on it in Google Cloud Console. */
-const GEMINI_API_KEY = "AQ.Ab8RN6KBBydnZMOjf65eYLMbDMA-zKZAgKprp8ONGOUKIxx1Qw";
 const GEMINI_MODEL = "gemini-3.5-flash"; // gemini-2.0-flash-exp was shut down June 1, 2026 — this is Google's current GA replacement
 const STORAGE_KEY = "mohammad-macro-playbook-v2";
+// The Gemini key is stored under its OWN localStorage key, deliberately separate
+// from `state`. This matters for two reasons:
+// 1. It's entered via Settings and never written into index.html / the repo, so it
+//    can't leak through git or GitHub's public secret scanning.
+// 2. It's excluded from backupJSON()/restoreJSON() (those only touch `state`), so
+//    sharing or syncing a backup file never leaks the key either.
+const API_KEY_STORAGE = "mohammad-macro-playbook-gemini-key";
+let GEMINI_API_KEY = localStorage.getItem(API_KEY_STORAGE) || "";
 const COLOR_PALETTE = ["#f07178", "#ffcb6b", "#7ee2b8", "#6ea8fe", "#c792ea", "#89ddff", "#ff8a65", "#9aa3b2"];
 
 /* ============================================================
@@ -914,6 +921,25 @@ function openSettings() {
     <div class="modal">
       <h3>⚙️ Settings & Analytics</h3>
       <div class="card">
+        <h4>🤖 AI (Gemini) Key</h4>
+        <p style="color:var(--muted); font-size:12px; margin:0 0 8px">
+          Powers Draft Reply, tone rewrites, AI Scan matching, and policy ingestion.
+          Stored only in this browser's local storage — never saved into the page's
+          source, never included in JSON backups, and never sent anywhere except
+          directly to Google's Gemini API. Get a key at
+          <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style="color:var(--accent)">aistudio.google.com/apikey</a>.
+        </p>
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap">
+          <input id="gemini-key-input" type="password" placeholder="Paste your Gemini API key" value="${GEMINI_API_KEY ? escapeHtml(GEMINI_API_KEY) : ''}" style="flex:1; min-width:200px" autocomplete="off" />
+          <button class="btn sm ghost" type="button" onclick="const i=document.getElementById('gemini-key-input'); i.type = i.type==='password' ? 'text' : 'password';">👁</button>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; align-items:center">
+          <button class="btn primary" onclick="saveGeminiKey()">Save Key</button>
+          <button class="btn danger" onclick="clearGeminiKey()">Clear Key</button>
+          <span style="font-size:12px; color:${GEMINI_API_KEY ? 'var(--accent-2)' : 'var(--muted)'}">${GEMINI_API_KEY ? '✓ Key set — AI features active' : 'No key set — AI features disabled'}</span>
+        </div>
+      </div>
+      <div class="card">
         <h4>📈 Velocity — Most Used</h4>
         ${usageEntries.slice(0,10).map(e => `<div class="stat-row"><span>${escapeHtml(e.label)}</span><span class="count">${e.count}×</span></div>`).join('') || '<p style="color:var(--muted); font-size:12px">No usage data yet.</p>'}
       </div>
@@ -976,7 +1002,7 @@ async function ingestPolicy() {
   const text = document.getElementById("policy-text").value.trim();
   if (!text) return;
   state.policy = text;
-  if (!hasApiKey()) { toast("Set GEMINI_API_KEY to auto-generate tree"); save(); closeModal(); return; }
+  if (!hasApiKey()) { toast("Add a Gemini key in ⚙️ Settings to auto-generate tree"); save(); closeModal(); return; }
   toast("AI generating tree...");
   const prompt = `You are a customer service knowledge architect. Parse the following company policy into a hierarchical tree of macros. Return STRICT JSON only, no prose, no markdown fences. Schema:
 {"tree":[{"type":"title","label":"...","children":[{"type":"macro","label":"...","text":"..."},{"type":"title","label":"...","children":[...]}]}]}
@@ -1070,7 +1096,7 @@ async function aiDraftReply() {
   const msg = document.getElementById("ai-scan-input").value.trim();
   const box = document.getElementById("ai-scan-results");
   if (!msg) return;
-  if (!hasApiKey()) { toast("Set GEMINI_API_KEY first"); return; }
+  if (!hasApiKey()) { toast("Add a Gemini key in ⚙️ Settings first"); return; }
   box.innerHTML = '<p style="color:var(--muted); font-size:12px">Drafting...</p>';
   const macros = flattenMacros().map(m => `${m.node.label}: ${m.node.text}`).join('\n');
   const prompt = `You are Mohammad's customer service assistant. Company policy: ${state.policy || 'none'}\n\nExisting macro tone reference:\n${macros}\n\nCustomer message: "${msg}"\n\nWrite ONE best reply in the same language as the customer message. Match professional, empathetic tone. Use [brackets] for placeholders. Return only the reply text.`;
@@ -1114,7 +1140,7 @@ function suggestionHtml(m) {
    TONE REWRITE
    ============================================================ */
 async function rewriteTone(tone) {
-  if (!hasApiKey()) { toast("Set GEMINI_API_KEY first"); return; }
+  if (!hasApiKey()) { toast("Add a Gemini key in ⚙️ Settings first"); return; }
   const editor = document.getElementById("macro-editor");
   const text = serializeEditor(editor);
   toast(`Rewriting as ${tone}...`);
@@ -1129,7 +1155,7 @@ async function rewriteTone(tone) {
 async function aiRewriteFromIntent() {
   const intent = prompt("Describe the intent (e.g. 'push back about cancellation policy'):");
   if (!intent) return;
-  if (!hasApiKey()) { toast("Set GEMINI_API_KEY first"); return; }
+  if (!hasApiKey()) { toast("Add a Gemini key in ⚙️ Settings first"); return; }
   const draft = await aiGenerate(`Write a professional customer service macro in ${state.lang === 'ar' ? 'Arabic' : 'English'} for: ${intent}. Policy: ${state.policy || 'none'}. Use [brackets] for placeholders.`);
   if (draft) {
     const f = findNode(state.activeId);
@@ -1140,11 +1166,29 @@ async function aiRewriteFromIntent() {
 /* ============================================================
    GEMINI API
    ============================================================ */
-function hasApiKey() { return GEMINI_API_KEY && GEMINI_API_KEY !== "PASTE_YOUR_KEY_HERE"; }
+function hasApiKey() { return !!GEMINI_API_KEY; }
+
+function saveGeminiKey() {
+  const val = (document.getElementById("gemini-key-input").value || "").trim();
+  if (!val) { toast("Enter a key first, or use Clear Key to remove it"); return; }
+  GEMINI_API_KEY = val;
+  localStorage.setItem(API_KEY_STORAGE, val);
+  toast("Gemini key saved to this browser");
+  closeModal();
+  openSettings();
+}
+
+function clearGeminiKey() {
+  GEMINI_API_KEY = "";
+  localStorage.removeItem(API_KEY_STORAGE);
+  toast("Gemini key cleared");
+  closeModal();
+  openSettings();
+}
 
 async function aiGenerate(prompt) {
-  if (!GEMINI_API_KEY || GEMINI_API_KEY === "PASTE_YOUR_KEY_HERE") {
-    toast("AI error: GEMINI_API_KEY is not set. Paste your Google AI Studio key at the top of the script.");
+  if (!GEMINI_API_KEY) {
+    toast("AI error: no Gemini API key set. Add one in ⚙️ Settings → AI (Gemini) Key.");
     return null;
   }
   let res;
@@ -1170,7 +1214,7 @@ async function aiGenerate(prompt) {
     const msg = data?.error?.message || ("HTTP " + res.status);
     const status = data?.error?.status ? " [" + data.error.status + "]" : "";
     console.error("Gemini API error", data);
-    if (res.status === 400 && /API key/i.test(msg)) toast("AI error: invalid API key. Check GEMINI_API_KEY.");
+    if (res.status === 400 && /API key/i.test(msg)) toast("AI error: invalid API key. Check it in ⚙️ Settings.");
     else if (res.status === 403) toast("AI error: access denied — key lacks permission for " + GEMINI_MODEL + " (" + msg + ")");
     else if (res.status === 404) toast("AI error: model '" + GEMINI_MODEL + "' not found. Update GEMINI_MODEL.");
     else if (res.status === 429) toast("AI error: rate limit / quota exceeded. Wait and retry.");
