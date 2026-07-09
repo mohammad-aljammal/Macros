@@ -1,0 +1,1260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Mohammad's Macro Playbook</title>
+<link rel="icon" href="favicon.ico" />
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1f2430;
+    --border: #2a2f3d;
+    --text: #e6e8ee;
+    --muted: #9aa3b2;
+    --accent: #6ea8fe;
+    --accent-2: #7ee2b8;
+    --danger: #f07178;
+    --warn: #ffcb6b;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text); font-size: 14px;
+  }
+  button { font-family: inherit; cursor: pointer; }
+  input, textarea, select {
+    font-family: inherit; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; outline: none;
+  }
+  input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+  .btn {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    padding: 6px 12px; border-radius: 6px; font-size: 13px;
+  }
+  .btn:hover { background: #2a3040; }
+  .btn.primary { background: var(--accent); color: #0f1115; border-color: transparent; font-weight: 600; }
+  .btn.danger { background: transparent; color: var(--danger); border-color: var(--danger); }
+  .btn.ghost { background: transparent; border-color: transparent; color: var(--muted); }
+  .btn.sm { padding: 3px 8px; font-size: 11px; }
+
+  /* Top Bar */
+  .topbar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 10;
+  }
+  .brand { font-weight: 700; font-size: 15px; margin-right: auto; }
+  .brand .who { color: var(--accent); }
+  .lang-toggle {
+    display: inline-flex; background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 999px; padding: 2px;
+  }
+  .lang-toggle button {
+    background: transparent; color: var(--muted); border: none;
+    padding: 6px 14px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  }
+  .lang-toggle button.active { background: var(--accent); color: #0f1115; }
+  .search { flex: 0 1 300px; }
+
+  /* Layout */
+  .layout { display: grid; grid-template-columns: 340px 1fr 360px; height: calc(100vh - 53px); }
+  .col { overflow-y: auto; padding: 14px; }
+  .col.tree { border-right: 1px solid var(--border); background: var(--panel); }
+  .col.center { background: var(--bg); }
+  .col.side { border-left: 1px solid var(--border); background: var(--panel); }
+
+  .col h3 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--muted); margin: 6px 0 10px;
+  }
+
+  /* Tree */
+  .node { margin: 2px 0; }
+  .node-row {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 8px; border-radius: 6px; cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .node-row:hover { background: var(--panel-2); }
+  .node-row.active { background: var(--panel-2); border-color: var(--accent); }
+  .node-row .caret { width: 14px; color: var(--muted); font-size: 10px; user-select: none; }
+  .node-row .icon { width: 16px; text-align: center; color: var(--muted); }
+  .node-row .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .node-row .fav { color: var(--warn); }
+  .node-row .actions { display: none; gap: 2px; }
+  .node-row:hover .actions { display: inline-flex; }
+  .node-row .actions button {
+    background: transparent; border: none; color: var(--muted);
+    padding: 2px 5px; border-radius: 4px; font-size: 12px;
+  }
+  .node-row .actions button:hover { background: #2a3040; color: var(--text); }
+
+  /* Depth styling */
+  .node[data-type="title"] > .node-row > .label { font-weight: 600; }
+  .node[data-depth="0"] > .node-row > .label { font-size: 14px; }
+  .node[data-depth="1"] > .node-row > .label { font-size: 13px; opacity: 0.95; }
+  .node[data-depth="2"] > .node-row > .label { font-size: 12.5px; opacity: 0.85; }
+  .node[data-depth="3"] > .node-row > .label { font-size: 12px; opacity: 0.75; }
+  .node[data-depth="4"] > .node-row > .label,
+  .node[data-depth="5"] > .node-row > .label { font-size: 11.5px; opacity: 0.65; }
+  .node[data-type="macro"] > .node-row > .icon { color: var(--accent-2); }
+  .node-row .color-dot {
+    width: 9px; height: 9px; border-radius: 50%; flex: none;
+    border: 1px solid rgba(255,255,255,0.25); cursor: pointer;
+  }
+  .node-row .color-dot.none { background: transparent; border: 1px dashed var(--border); }
+
+  .children { margin-left: 15px; border-left: 1px dashed var(--border); padding-left: 6px; }
+  .children.collapsed { display: none; }
+
+  .node-row .caret.has-children { cursor: pointer; }
+  .node-row .actions button[data-act="pin"].pinned { color: var(--warn); }
+
+  /* Color picker popover */
+  .color-popover {
+    position: fixed; z-index: 300; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px; display: flex; gap: 6px; flex-wrap: wrap; width: 132px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  }
+  .color-popover .swatch {
+    width: 20px; height: 20px; border-radius: 50%; cursor: pointer;
+    border: 2px solid transparent;
+  }
+  .color-popover .swatch:hover { border-color: var(--text); }
+  .color-popover .swatch.none { background: var(--panel-2); border: 1px dashed var(--muted); position: relative; }
+  .color-popover .swatch.none::after { content: "✕"; position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:10px; color: var(--muted); }
+
+  /* Search results */
+  .search-results .result-item {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 10px; margin-bottom: 6px; cursor: pointer;
+  }
+  .search-results .result-item:hover { border-color: var(--accent); }
+  .search-results .result-path { color: var(--muted); font-size: 10.5px; margin-bottom: 3px; }
+  .search-results .result-label { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+  .search-results .result-snippet { color: var(--muted); font-size: 12px; margin-top: 4px; line-height: 1.4; }
+  .search-results .result-snippet mark { background: rgba(255,203,107,0.35); color: var(--text); border-radius: 2px; padding: 0 1px; }
+  .search-results .no-results { color: var(--muted); font-size: 12px; padding: 10px 4px; }
+
+  /* Center panel - macro editor */
+  .empty-state { color: var(--muted); text-align: center; padding: 60px 20px; }
+  .macro-view h2 { margin: 0 0 4px; font-size: 18px; }
+  .breadcrumb { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+  .macro-editor {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px; min-height: 200px; line-height: 1.6; white-space: pre-wrap;
+    font-size: 14px; outline: none;
+  }
+  .macro-editor:focus { border-color: var(--accent); }
+  .macro-editor.flash { animation: flash 0.6s ease; }
+  @keyframes flash { 0%,100% { border-color: var(--border); } 50% { border-color: var(--warn); box-shadow: 0 0 0 3px rgba(255,203,107,0.2); } }
+
+  .placeholder-chip {
+    display: inline-block;
+    background: rgba(255, 203, 107, 0.18);
+    border: 1px solid var(--warn);
+    color: var(--text);
+    border-radius: 4px;
+    padding: 0 4px;
+    margin: 0 1px;
+    min-width: 64px;
+    outline: none;
+    font-style: normal;
+  }
+  /* Shaded, transparent-looking hint text shown only while the chip is empty */
+  .placeholder-chip:empty::before {
+    content: attr(data-label);
+    color: var(--muted);
+    opacity: 0.65;
+    font-style: italic;
+    pointer-events: none;
+  }
+  .placeholder-chip.filled {
+    background: rgba(126, 226, 184, 0.15);
+    border-color: var(--accent-2);
+    color: var(--text);
+    font-style: normal;
+  }
+  .placeholder-chip:focus { box-shadow: 0 0 0 2px rgba(110, 168, 254, 0.4); }
+
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+  .tone-btn { background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); padding: 5px 10px; border-radius: 999px; font-size: 12px; }
+  .tone-btn:hover { color: var(--text); border-color: var(--accent); }
+
+  /* Right column */
+  .card {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 12px; margin-bottom: 12px;
+  }
+  .card h4 { margin: 0 0 8px; font-size: 13px; }
+  .suggestion {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px; margin-top: 8px; font-size: 13px; line-height: 1.5;
+  }
+  .suggestion .path { color: var(--muted); font-size: 11px; margin-bottom: 6px; }
+  .suggestion .actions { display: flex; gap: 6px; margin-top: 8px; }
+
+  /* Modal */
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .modal {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 20px; max-width: 560px; width: 92%; max-height: 88vh; overflow-y: auto;
+  }
+  .modal h3 { margin: 0 0 12px; }
+  .modal .row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+  .modal .row label { font-size: 12px; color: var(--muted); }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+
+  /* Analytics */
+  .stat-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed var(--border); font-size: 13px; }
+  .stat-row:last-child { border: none; }
+  .stat-row .count { color: var(--accent); font-weight: 600; }
+
+  [dir="rtl"] .col.tree { border-right: none; border-left: 1px solid var(--border); }
+  [dir="rtl"] .col.side { border-left: none; border-right: 1px solid var(--border); }
+  [dir="rtl"] .children { margin-left: 0; margin-right: 15px; border-left: none; border-right: 1px dashed var(--border); padding-left: 0; padding-right: 6px; }
+
+  .badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); }
+  .toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: var(--panel-2); border: 1px solid var(--accent); color: var(--text);
+    padding: 10px 18px; border-radius: 8px; z-index: 200; font-size: 13px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand">Mohammad<span class="who">'s</span> Macro Playbook</div>
+  <input class="search" id="search" placeholder="Search macros..." />
+  <div class="lang-toggle" id="lang-toggle">
+    <button data-lang="en" class="active">EN</button>
+    <button data-lang="ar">AR</button>
+  </div>
+  <button class="btn" onclick="openPolicyModal()">🧠 Ingest Policy</button>
+  <button class="btn" onclick="openSettings()">⚙️ Settings</button>
+</div>
+
+<div class="layout">
+  <div class="col tree">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+      <h3 style="margin:0">Playbook Tree</h3>
+      <button class="btn sm primary" onclick="addRootNode()">+ New</button>
+    </div>
+    <div id="tree"></div>
+  </div>
+
+  <div class="col center" id="center">
+    <div class="empty-state">
+      <p>Select a macro from the tree to view or edit.</p>
+      <p style="font-size:12px">Tip: You can add a <b>child</b> to <em>any</em> node — titles or macros — for infinite nesting.</p>
+    </div>
+  </div>
+
+  <div class="col side">
+    <div class="card">
+      <h4>🤖 AI Scan — Match Customer Message</h4>
+      <textarea id="ai-scan-input" rows="4" style="width:100%" placeholder="Paste customer message here..."></textarea>
+      <div class="toolbar">
+        <button class="btn primary" onclick="aiScanMatches()">Find Best Match</button>
+        <button class="btn" onclick="aiDraftReply()">Draft Reply</button>
+      </div>
+      <div id="ai-scan-results"></div>
+    </div>
+
+    <div class="card">
+      <h4>⭐ Favorites</h4>
+      <div id="favorites-list"></div>
+    </div>
+  </div>
+</div>
+
+<div id="modal-root"></div>
+<div id="toast-root"></div>
+
+<script>
+/* ============================================================
+   CONFIG
+   ============================================================ */
+/* NOTE ON SECURITY: this key is hardcoded into a static, client-side page at
+   Mohammad's explicit request. Anyone who opens this page's source or dev tools
+   can read and reuse this key against Google Cloud project 1069082963444
+   ("Mohammad's Macro-Playbook"). Google's own docs explicitly advise against
+   embedding any Gemini key (standard or auth) in client-side code for exactly
+   this reason. If this page is ever hosted publicly, rotate this key and set
+   a billing alert / IP restriction on it in Google Cloud Console. */
+const GEMINI_API_KEY = "AQ.Ab8RN6KBBydnZMOjf65eYLMbDMA-zKZAgKprp8ONGOUKIxx1Qw";
+const GEMINI_MODEL = "gemini-3.5-flash"; // gemini-2.0-flash-exp was shut down June 1, 2026 — this is Google's current GA replacement
+const STORAGE_KEY = "mohammad-macro-playbook-v2";
+const COLOR_PALETTE = ["#f07178", "#ffcb6b", "#7ee2b8", "#6ea8fe", "#c792ea", "#89ddff", "#ff8a65", "#9aa3b2"];
+
+/* ============================================================
+   STATE
+   ============================================================ */
+let state = loadState();
+// Session-only "which folders are currently expanded" tracker. Not persisted:
+// every fresh page load starts fully collapsed except for pinned folders.
+// Toggling a folder open/closed during a session updates this set; it resets
+// on refresh, per the requested behavior.
+let sessionExpanded = new Set(state.pinnedFolders || []);
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (!parsed.pinnedFolders) parsed.pinnedFolders = [];
+      return parsed;
+    }
+  } catch (e) {}
+  return defaultState();
+}
+
+function defaultState() {
+  const uid = () => Math.random().toString(36).slice(2, 10);
+  const enGreetId = uid();
+  const arGreetId = uid();
+  return {
+    lang: "en",
+    activeId: null,
+    policy: "",
+    favorites: [],
+    usage: {},
+    // Folder ids the user has explicitly pinned open; they stay expanded across reloads.
+    // Everything else initializes collapsed on each page load (session-only expand state
+    // is tracked separately in `sessionExpanded`, not persisted).
+    pinnedFolders: [],
+    trees: {
+      en: [
+        { id: uid(), type: "title", label: "Greetings", color: null, children: [
+          { id: enGreetId, type: "macro", label: "Welcome message", color: null, text: "Hi [Customer Name], thank you for reaching out! How can I help you today?", children: [] }
+        ]},
+        { id: uid(), type: "title", label: "Refunds", color: null, children: [] }
+      ],
+      ar: [
+        { id: uid(), type: "title", label: "التحيات", color: null, children: [
+          { id: arGreetId, type: "macro", label: "رسالة ترحيب", color: null, text: "مرحباً [اسم العميل]، شكراً لتواصلك معنا! كيف يمكنني مساعدتك اليوم؟", children: [] }
+        ]},
+        { id: uid(), type: "title", label: "المبالغ المستردة", color: null, children: [] }
+      ]
+    },
+    // Map English node id -> Arabic mirror node id (for sync)
+    mirror: { [enGreetId]: arGreetId }
+  };
+}
+
+function save() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+const uid = () => Math.random().toString(36).slice(2, 10);
+
+/* ============================================================
+   TREE HELPERS
+   ============================================================ */
+function currentTree() { return state.trees[state.lang]; }
+
+function findNode(id, tree = currentTree(), parent = null, path = []) {
+  for (const n of tree) {
+    if (n.id === id) return { node: n, parent, siblings: tree, path };
+    const found = findNode(id, n.children || [], n, [...path, n]);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findNodeInLang(id, lang) {
+  return findNode(id, state.trees[lang]);
+}
+
+function removeNode(id) {
+  const f = findNode(id);
+  if (!f) return;
+  const idx = f.siblings.indexOf(f.node);
+  f.siblings.splice(idx, 1);
+  // Remove mirror
+  const mirrorId = getMirrorId(id);
+  if (mirrorId) {
+    const otherLang = state.lang === "en" ? "ar" : "en";
+    const mf = findNodeInLang(mirrorId, otherLang);
+    if (mf) mf.siblings.splice(mf.siblings.indexOf(mf.node), 1);
+    deleteMirror(id);
+  }
+  if (state.activeId === id) state.activeId = null;
+}
+
+function getMirrorId(id) {
+  if (state.mirror[id]) return state.mirror[id];
+  for (const [k, v] of Object.entries(state.mirror)) if (v === id) return k;
+  return null;
+}
+function setMirror(enId, arId) { state.mirror[enId] = arId; }
+function deleteMirror(id) {
+  delete state.mirror[id];
+  for (const [k, v] of Object.entries(state.mirror)) if (v === id) delete state.mirror[k];
+}
+
+/* ============================================================
+   RENDERING
+   ============================================================ */
+function render() {
+  document.documentElement.dir = state.lang === "ar" ? "rtl" : "ltr";
+  document.querySelectorAll("#lang-toggle button").forEach(b => {
+    b.classList.toggle("active", b.dataset.lang === state.lang);
+  });
+  renderTree();
+  renderCenter();
+  renderFavorites();
+  save();
+}
+
+function renderTree() {
+  const container = document.getElementById("tree");
+  const query = document.getElementById("search").value.trim().toLowerCase();
+  container.innerHTML = "";
+  if (query) {
+    container.appendChild(renderSearchResults(query));
+    return;
+  }
+  currentTree().forEach(n => container.appendChild(renderNode(n, 0)));
+}
+
+function nodeMatches(n, q) {
+  if (!q) return true;
+  if (n.label.toLowerCase().includes(q)) return true;
+  if (n.text && n.text.toLowerCase().includes(q)) return true;
+  return (n.children || []).some(c => nodeMatches(c, q));
+}
+
+/* ============================================================
+   SMART SEARCH — flat results with folder path + highlighted snippet
+   ============================================================ */
+function renderSearchResults(query) {
+  const box = document.createElement("div");
+  box.className = "search-results";
+  const results = [];
+  const walk = (nodes, path) => nodes.forEach(n => {
+    const labelHit = n.label.toLowerCase().includes(query);
+    const textHit = !!(n.text && n.text.toLowerCase().includes(query));
+    if (labelHit || textHit) results.push({ node: n, path, labelHit, textHit });
+    walk(n.children || [], [...path, n.label]);
+  });
+  walk(currentTree(), []);
+
+  if (!results.length) {
+    box.innerHTML = `<div class="no-results">No matches for "${escapeHtml(query)}".</div>`;
+    return box;
+  }
+
+  results.forEach(r => {
+    const item = document.createElement("div");
+    item.className = "result-item";
+    const icon = r.node.type === "title" ? "📁" : "📝";
+    const dot = r.node.color ? `<span class="color-dot" style="background:${r.node.color}"></span>` : "";
+    const pathStr = r.path.length ? r.path.join(" › ") : (r.node.type === "title" ? "Top level" : "");
+    let snippetHtml = "";
+    if (r.textHit) {
+      snippetHtml = `<div class="result-snippet">${highlightSnippet(r.node.text, query)}</div>`;
+    }
+    item.innerHTML = `
+      <div class="result-path">${escapeHtml(pathStr)}</div>
+      <div class="result-label">${dot}${icon} ${escapeHtml(r.node.label)}</div>
+      ${snippetHtml}
+    `;
+    item.addEventListener("click", () => {
+      // Ensure ancestors are expanded so the node is visible once search clears
+      let cur = findNode(r.node.id);
+      if (cur) cur.path.forEach(p => sessionExpanded.add(p.id));
+      state.activeId = r.node.id;
+      document.getElementById("search").value = "";
+      render();
+    });
+    box.appendChild(item);
+  });
+  return box;
+}
+
+/* Builds a truncated, highlighted preview snippet centered on the first match */
+function highlightSnippet(text, query, radius = 60) {
+  const lower = text.toLowerCase();
+  const idx = lower.indexOf(query);
+  if (idx === -1) return escapeHtml(text.slice(0, 100)) + (text.length > 100 ? "…" : "");
+  const start = Math.max(0, idx - radius);
+  const end = Math.min(text.length, idx + query.length + radius);
+  let snippet = text.slice(start, end);
+  const prefix = start > 0 ? "…" : "";
+  const suffix = end < text.length ? "…" : "";
+  // Escape first, then wrap the (still plain-text) match in <mark>
+  const before = escapeHtml(snippet.slice(0, idx - start));
+  const match = escapeHtml(snippet.slice(idx - start, idx - start + query.length));
+  const after = escapeHtml(snippet.slice(idx - start + query.length));
+  return prefix + before + `<mark>${match}</mark>` + after + suffix;
+}
+
+function renderNode(node, depth) {
+  const wrap = document.createElement("div");
+  wrap.className = "node";
+  wrap.dataset.type = node.type;
+  wrap.dataset.depth = depth;
+
+  const hasChildren = !!(node.children && node.children.length);
+  const isTitle = node.type === "title";
+  const isPinned = state.pinnedFolders.includes(node.id);
+  // Folders default collapsed each load; stay expanded during the session once opened,
+  // unless pinned open (which persists across reloads too).
+  const isExpanded = !hasChildren || !isTitle || sessionExpanded.has(node.id);
+
+  const row = document.createElement("div");
+  row.className = "node-row" + (state.activeId === node.id ? " active" : "");
+  const isFav = state.favorites.includes(node.id);
+  const icon = node.type === "title" ? "📁" : "📝";
+  const caret = hasChildren ? (isExpanded ? "▾" : "▸") : "";
+  const dotStyle = node.color ? `style="background:${node.color}"` : "";
+  row.innerHTML = `
+    <span class="caret${hasChildren ? " has-children" : ""}">${caret}</span>
+    <span class="color-dot${node.color ? "" : " none"}" ${dotStyle} title="Set color" data-act="color"></span>
+    <span class="icon">${icon}</span>
+    <span class="label">${escapeHtml(node.label)}</span>
+    ${isFav ? '<span class="fav">★</span>' : ''}
+    <span class="actions">
+      <button title="Add child" data-act="add">+</button>
+      ${isTitle ? `<button title="${isPinned ? 'Unpin (auto-collapse on reload)' : 'Pin open (stay expanded on reload)'}" data-act="pin" class="${isPinned ? 'pinned' : ''}">📌</button>` : ''}
+      <button title="Favorite" data-act="fav">★</button>
+      <button title="Rename" data-act="edit">✎</button>
+      <button title="Delete" data-act="del">🗑</button>
+    </span>
+  `;
+  row.addEventListener("click", (e) => {
+    const act = e.target.dataset.act;
+    if (act === "add") { e.stopPropagation(); addChildTo(node.id); return; }
+    if (act === "fav") { e.stopPropagation(); toggleFav(node.id); return; }
+    if (act === "edit") { e.stopPropagation(); renameNode(node.id); return; }
+    if (act === "pin") { e.stopPropagation(); toggleFolderPin(node.id); return; }
+    if (act === "color") { e.stopPropagation(); openColorPopover(e.target, node.id); return; }
+    if (act === "del") { e.stopPropagation(); if (confirm(`Delete "${node.label}"?`)) { removeNode(node.id); render(); } return; }
+    if (hasChildren && isTitle && e.target.closest(".label, .caret, .icon")) {
+      toggleFolderExpanded(node.id);
+      return;
+    }
+    state.activeId = node.id;
+    render();
+  });
+  wrap.appendChild(row);
+
+  if (hasChildren) {
+    const kids = document.createElement("div");
+    kids.className = "children" + (isExpanded ? "" : " collapsed");
+    node.children.forEach(c => kids.appendChild(renderNode(c, depth + 1)));
+    wrap.appendChild(kids);
+  }
+  return wrap;
+}
+
+function toggleFolderExpanded(id) {
+  if (sessionExpanded.has(id)) sessionExpanded.delete(id);
+  else sessionExpanded.add(id);
+  renderTree();
+}
+
+function toggleFolderPin(id) {
+  const i = state.pinnedFolders.indexOf(id);
+  if (i >= 0) { state.pinnedFolders.splice(i, 1); }
+  else { state.pinnedFolders.push(id); sessionExpanded.add(id); }
+  save();
+  renderTree();
+}
+
+/* ============================================================
+   COLOR PICKER
+   ============================================================ */
+function openColorPopover(anchorEl, nodeId) {
+  document.querySelectorAll(".color-popover").forEach(p => p.remove());
+  const rect = anchorEl.getBoundingClientRect();
+  const pop = document.createElement("div");
+  pop.className = "color-popover";
+  pop.style.top = (rect.bottom + 6) + "px";
+  pop.style.left = rect.left + "px";
+  pop.innerHTML = `<div class="swatch none" title="No color"></div>` +
+    COLOR_PALETTE.map(c => `<div class="swatch" style="background:${c}" data-color="${c}"></div>`).join("");
+  pop.addEventListener("click", (e) => {
+    const sw = e.target.closest(".swatch");
+    if (!sw) return;
+    const f = findNode(nodeId);
+    if (f) { f.node.color = sw.dataset.color || null; save(); render(); }
+    pop.remove();
+  });
+  document.body.appendChild(pop);
+  setTimeout(() => {
+    document.addEventListener("click", function onDocClick(ev) {
+      if (!pop.contains(ev.target)) { pop.remove(); document.removeEventListener("click", onDocClick); }
+    });
+  }, 0);
+}
+
+function renderCenter() {
+  const el = document.getElementById("center");
+  if (!state.activeId) {
+    el.innerHTML = `<div class="empty-state"><p>Select a macro from the tree to view or edit.</p><p style="font-size:12px">Add a <b>child</b> to <em>any</em> node — titles or macros — for infinite nesting.</p></div>`;
+    return;
+  }
+  const f = findNode(state.activeId);
+  if (!f) { state.activeId = null; renderCenter(); return; }
+  const { node, path } = f;
+  const crumbs = [...path.map(p => p.label), node.label].join(" › ");
+
+  const colorDot = `<span class="color-dot${node.color ? '' : ' none'}" title="Set color" onclick="openColorPopover(this,'${node.id}')" style="display:inline-block; vertical-align:middle; margin-${state.lang==='ar'?'right':'left'}:8px; width:12px; height:12px; ${node.color ? `background:${node.color};` : ''}"></span>`;
+
+  if (node.type === "title") {
+    el.innerHTML = `
+      <div class="macro-view">
+        <h2>📁 ${escapeHtml(node.label)} ${colorDot}</h2>
+        <div class="breadcrumb">${escapeHtml(crumbs)} <span class="badge">Title</span></div>
+        <div class="toolbar">
+          <button class="btn primary" onclick="addChildTo('${node.id}', 'macro')">+ Add Macro</button>
+          <button class="btn" onclick="addChildTo('${node.id}', 'title')">+ Add Sub-Title</button>
+          <button class="btn" onclick="renameNode('${node.id}')">Rename</button>
+        </div>
+        <p style="color:var(--muted); font-size:13px; margin-top:20px">
+          This is a structural title. Add child titles or macros to build your hierarchy.
+          ${node.children.length ? `<br>Contains <b>${node.children.length}</b> child node(s).` : ''}
+        </p>
+      </div>
+    `;
+    return;
+  }
+
+  // Macro view
+  const usage = state.usage[node.id] || 0;
+  el.innerHTML = `
+    <div class="macro-view">
+      <h2>📝 ${escapeHtml(node.label)} ${colorDot}</h2>
+      <div class="breadcrumb">${escapeHtml(crumbs)} <span class="badge">Macro</span> <span class="badge">Used ${usage}×</span></div>
+      <div class="toolbar">
+        <button class="btn primary" onclick="copyMacro()">📋 Copy</button>
+        <button class="tone-btn" onclick="rewriteTone('empathetic')">💗 Empathetic</button>
+        <button class="tone-btn" onclick="rewriteTone('professional')">💼 Professional</button>
+        <button class="tone-btn" onclick="rewriteTone('friendly')">😊 Friendly</button>
+        <button class="btn" onclick="aiRewriteFromIntent()">✨ AI Draft from Intent</button>
+        <button class="btn" onclick="editMacroText('${node.id}')">✎ Edit Text</button>
+        <button class="btn" onclick="addChildTo('${node.id}', 'macro')">+ Sub-Macro</button>
+        <button class="btn" onclick="addChildTo('${node.id}', 'title')">+ Sub-Title</button>
+        <button class="btn" onclick="renameNode('${node.id}')">Rename</button>
+      </div>
+      <div id="macro-editor" class="macro-editor" contenteditable="true"></div>
+      <p style="color:var(--muted); font-size:11px; margin-top:8px">
+        Placeholders like [Customer Name] start empty with a shaded hint — click and type to fill them in.
+        Copying automatically clears them back to blank for the next case.
+      </p>
+    </div>
+  `;
+  const editor = document.getElementById("macro-editor");
+  renderMacroEditor(editor, node.text || "");
+  if ((node.text || "").includes("[")) {
+    editor.classList.add("flash");
+    setTimeout(() => editor.classList.remove("flash"), 700);
+  }
+  // NOTE: the editor intentionally does NOT autosave typed placeholder values back
+  // into node.text. node.text is the permanent template (with [brackets]); it only
+  // changes via "Edit Text", AI rewrite, or policy ingestion. This is what lets the
+  // chips reset to blank after copy / on next visit instead of baking typed values
+  // into the saved macro.
+}
+
+function editMacroText(id) {
+  const f = findNode(id); if (!f) return;
+  const nv = prompt("Edit macro text (use [Brackets] for placeholders):", f.node.text || "");
+  if (nv !== null) { f.node.text = nv; save(); render(); }
+}
+
+/* Renders macro text as HTML with editable, initially-empty placeholder chips.
+   Each chip shows a shaded/transparent hint (the placeholder name) via CSS
+   until the user types into it. */
+function renderMacroEditor(el, text) {
+  el.innerHTML = "";
+  const parts = text.split(/(\[[^\]]+\])/g);
+  parts.forEach(part => {
+    if (/^\[[^\]]+\]$/.test(part)) {
+      const chip = document.createElement("span");
+      chip.className = "placeholder-chip";
+      chip.contentEditable = "true";
+      chip.dataset.placeholder = part;
+      chip.dataset.label = part.slice(1, -1);
+      chip.textContent = ""; // start completely empty — no bracket text to delete
+      chip.addEventListener("input", () => {
+        chip.classList.toggle("filled", chip.textContent.trim().length > 0);
+      });
+      el.appendChild(chip);
+    } else if (part) {
+      el.appendChild(document.createTextNode(part));
+    }
+  });
+}
+
+function serializeEditor(el) {
+  // WYSIWYG serialize: whatever is visible in the editor is what gets copied.
+  // A chip that's still empty falls back to its original [Bracket Placeholder]
+  // text so the copied output makes clear it wasn't filled in.
+  let out = "";
+  el.childNodes.forEach(n => {
+    if (n.nodeType === Node.TEXT_NODE) out += n.textContent;
+    else if (n.classList && n.classList.contains("placeholder-chip")) {
+      const typed = n.textContent.trim();
+      out += typed ? n.textContent : n.dataset.placeholder;
+    } else if (n.nodeType === Node.ELEMENT_NODE) {
+      out += n.textContent;
+    }
+  });
+  return out;
+}
+
+/* Clears every chip back to its empty, shaded-placeholder baseline. */
+function resetEditorChips(el) {
+  el.querySelectorAll(".placeholder-chip").forEach(chip => {
+    chip.textContent = "";
+    chip.classList.remove("filled");
+  });
+}
+
+function renderFavorites() {
+  const el = document.getElementById("favorites-list");
+  if (!state.favorites.length) { el.innerHTML = '<p style="color:var(--muted); font-size:12px">No favorites yet. Click ★ on any macro.</p>'; return; }
+  el.innerHTML = "";
+  state.favorites.forEach(id => {
+    const f = findNode(id);
+    if (!f) return;
+    const b = document.createElement("div");
+    b.className = "suggestion";
+    b.innerHTML = `<div class="path">${escapeHtml(f.path.map(p => p.label).join(" › "))}</div><b>${escapeHtml(f.node.label)}</b>`;
+    b.style.cursor = "pointer";
+    b.onclick = () => { state.activeId = id; render(); };
+    el.appendChild(b);
+  });
+}
+
+/* ============================================================
+   ACTIONS
+   ============================================================ */
+function toggleFav(id) {
+  const i = state.favorites.indexOf(id);
+  if (i >= 0) state.favorites.splice(i, 1); else state.favorites.push(id);
+  render();
+}
+
+function renameNode(id) {
+  const f = findNode(id); if (!f) return;
+  const nv = prompt("Rename:", f.node.label);
+  if (nv !== null && nv.trim()) {
+    f.node.label = nv.trim();
+    render();
+    // Sync mirror label (optionally translate)
+    syncMirrorLabel(id);
+  }
+}
+
+async function syncMirrorLabel(id) {
+  const mirrorId = getMirrorId(id);
+  if (!mirrorId) return;
+  const src = findNode(id); if (!src) return;
+  const otherLang = state.lang === "en" ? "ar" : "en";
+  const dst = findNodeInLang(mirrorId, otherLang); if (!dst) return;
+  if (hasApiKey()) {
+    const translated = await translateText(src.node.label, otherLang);
+    if (translated) dst.node.label = translated;
+  }
+  save();
+}
+
+function addRootNode() {
+  openNodeModal({ parentId: null });
+}
+function addChildTo(parentId, forcedType) {
+  openNodeModal({ parentId, forcedType });
+}
+
+function copyMacro() {
+  const editor = document.getElementById("macro-editor");
+  if (!editor) return;
+  const text = serializeEditor(editor);
+  navigator.clipboard.writeText(text);
+  state.usage[state.activeId] = (state.usage[state.activeId] || 0) + 1;
+  save();
+  // The instant it's copied, wipe the fields back to their empty, shaded
+  // baseline so the next case starts clean with no leftover customer data.
+  resetEditorChips(editor);
+  toast("Copied to clipboard — fields reset for next case");
+}
+
+/* ============================================================
+   MODAL — Add / Edit Node
+   ============================================================ */
+function openNodeModal({ parentId, forcedType, prefillText, prefillLabel }) {
+  const modal = document.createElement("div");
+  modal.className = "modal-backdrop";
+  modal.innerHTML = `
+    <div class="modal">
+      <h3>Add Node</h3>
+      <div class="row">
+        <label>Type</label>
+        <select id="nm-type">
+          <option value="title" ${forcedType==='title'?'selected':''}>Title (structural header)</option>
+          <option value="macro" ${forcedType==='macro'?'selected':''}>Macro (copyable text)</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>Label / Name</label>
+        <input id="nm-label" value="${escapeHtml(prefillLabel || '')}" placeholder="e.g. Refund Policy" />
+      </div>
+      <div class="row" id="nm-text-row">
+        <label>Macro Text (use [brackets] for placeholders)</label>
+        <textarea id="nm-text" rows="5" placeholder="Hi [Customer Name], ...">${escapeHtml(prefillText || '')}</textarea>
+        <div style="display:flex; gap:6px; margin-top:4px">
+          <input id="nm-intent" style="flex:1" placeholder="Describe intent (e.g. 'push back about cancellation policy')" />
+          <button class="btn" type="button" onclick="aiDraftIntoModal()">✨ AI Draft</button>
+        </div>
+      </div>
+      <div class="row">
+        <label><input type="checkbox" id="nm-sync" checked /> Auto-translate & mirror to other language</label>
+      </div>
+      <div class="modal-actions">
+        <button class="btn ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn primary" onclick="submitNodeModal('${parentId || ''}')">Save</button>
+      </div>
+    </div>
+  `;
+  document.getElementById("modal-root").appendChild(modal);
+  const toggle = () => {
+    document.getElementById("nm-text-row").style.display =
+      document.getElementById("nm-type").value === "macro" ? "flex" : "none";
+  };
+  document.getElementById("nm-type").addEventListener("change", toggle);
+  toggle();
+}
+
+async function aiDraftIntoModal() {
+  const intent = document.getElementById("nm-intent").value.trim();
+  if (!intent) { toast("Enter an intent first"); return; }
+  toast("AI drafting...");
+  const draft = await aiGenerate(`You are a customer service macro writer. Write a short professional macro response in ${state.lang === 'ar' ? 'Arabic' : 'English'} for this intent. Use [brackets] for placeholders. Policy context: ${state.policy || 'none'}\n\nIntent: ${intent}`);
+  if (draft) document.getElementById("nm-text").value = draft.trim();
+}
+
+async function submitNodeModal(parentId) {
+  const type = document.getElementById("nm-type").value;
+  const label = document.getElementById("nm-label").value.trim();
+  const text = type === "macro" ? document.getElementById("nm-text").value : "";
+  const sync = document.getElementById("nm-sync").checked;
+  if (!label) { toast("Label required"); return; }
+
+  const newNode = { id: uid(), type, label, text, color: null, children: [] };
+  const parent = parentId ? findNode(parentId) : null;
+  if (parent) parent.node.children.push(newNode);
+  else currentTree().push(newNode);
+
+  // Mirror to other lang
+  if (sync) {
+    const otherLang = state.lang === "en" ? "ar" : "en";
+    let mirrorParentId = null;
+    if (parentId) {
+      const mp = getMirrorId(parentId);
+      if (mp) mirrorParentId = mp;
+    }
+    const mirrorNode = {
+      id: uid(), type,
+      label: hasApiKey() ? (await translateText(label, otherLang)) || label : label,
+      text: (type === "macro" && text && hasApiKey()) ? (await translateText(text, otherLang)) || text : text,
+      color: newNode.color,
+      children: []
+    };
+    if (mirrorParentId) {
+      const mp = findNodeInLang(mirrorParentId, otherLang);
+      if (mp) mp.node.children.push(mirrorNode);
+      else state.trees[otherLang].push(mirrorNode);
+    } else {
+      state.trees[otherLang].push(mirrorNode);
+    }
+    const enId = state.lang === "en" ? newNode.id : mirrorNode.id;
+    const arId = state.lang === "en" ? mirrorNode.id : newNode.id;
+    setMirror(enId, arId);
+  }
+
+  state.activeId = newNode.id;
+  closeModal();
+  render();
+}
+
+function closeModal() { document.getElementById("modal-root").innerHTML = ""; }
+
+/* ============================================================
+   SETTINGS / ANALYTICS
+   ============================================================ */
+function openSettings() {
+  const usageEntries = Object.entries(state.usage).map(([id, c]) => {
+    const f = findNode(id) || findNodeInLang(id, "en") || findNodeInLang(id, "ar");
+    return { label: f ? f.node.label : "(deleted)", count: c };
+  }).sort((a,b) => b.count - a.count);
+
+  const allMacros = [];
+  ["en", "ar"].forEach(lang => {
+    const walk = (nodes) => nodes.forEach(n => {
+      if (n.type === "macro") allMacros.push({ id: n.id, label: n.label, lang });
+      walk(n.children || []);
+    });
+    walk(state.trees[lang]);
+  });
+  const underused = allMacros.filter(m => !state.usage[m.id]).slice(0, 10);
+
+  const modal = document.createElement("div");
+  modal.className = "modal-backdrop";
+  modal.innerHTML = `
+    <div class="modal">
+      <h3>⚙️ Settings & Analytics</h3>
+      <div class="card">
+        <h4>📈 Velocity — Most Used</h4>
+        ${usageEntries.slice(0,10).map(e => `<div class="stat-row"><span>${escapeHtml(e.label)}</span><span class="count">${e.count}×</span></div>`).join('') || '<p style="color:var(--muted); font-size:12px">No usage data yet.</p>'}
+      </div>
+      <div class="card">
+        <h4>💤 Underutilized</h4>
+        ${underused.map(m => `<div class="stat-row"><span>${escapeHtml(m.label)}</span><span class="badge">${m.lang}</span></div>`).join('') || '<p style="color:var(--muted); font-size:12px">All macros are being used!</p>'}
+      </div>
+      <div class="card">
+        <h4>💾 Backup & Restore</h4>
+        <p style="color:var(--muted); font-size:12px; margin:0 0 8px">Export all sections, macros, favorites, usage, and settings as a JSON file. Restore from a previously exported file.</p>
+        <div style="display:flex; gap:8px; flex-wrap:wrap">
+          <button class="btn primary" onclick="backupJSON()">⬇️ Backup JSON</button>
+          <button class="btn" onclick="document.getElementById('restore-file').click()">⬆️ Restore JSON</button>
+          <input id="restore-file" type="file" accept="application/json,.json" style="display:none" onchange="restoreJSON(event)" />
+        </div>
+      </div>
+      <div class="card">
+        <h4>🗑️ Danger Zone</h4>
+        <button class="btn danger" onclick="if(confirm('Reset ALL data?')){localStorage.removeItem('${STORAGE_KEY}');location.reload();}">Reset All Data</button>
+      </div>
+      <div class="modal-actions"><button class="btn primary" onclick="closeModal()">Close</button></div>
+    </div>
+  `;
+  document.getElementById("modal-root").appendChild(modal);
+}
+
+/* ============================================================
+   POLICY INGESTION
+   ============================================================ */
+function openPolicyModal() {
+  const modal = document.createElement("div");
+  modal.className = "modal-backdrop";
+  modal.innerHTML = `
+    <div class="modal">
+      <h3>🧠 Ingest / Update Company Policy</h3>
+      <p style="color:var(--muted); font-size:12px">
+        Paste raw policy text (e.g. cancellation, refund flow). AI will parse it into a title/sub-title/macro tree
+        and mirror the structure in Arabic. This policy also powers future AI suggestions.
+      </p>
+      <div class="row">
+        <label>Policy Text</label>
+        <textarea id="policy-text" rows="10" placeholder="e.g. Refunds: Customers may request refunds within 14 days...">${escapeHtml(state.policy)}</textarea>
+      </div>
+      <div class="modal-actions">
+        <button class="btn ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn" onclick="savePolicyOnly()">Save Policy Only</button>
+        <button class="btn primary" onclick="ingestPolicy()">Save & Generate Tree</button>
+      </div>
+    </div>
+  `;
+  document.getElementById("modal-root").appendChild(modal);
+}
+
+function savePolicyOnly() {
+  state.policy = document.getElementById("policy-text").value;
+  save(); closeModal(); toast("Policy saved");
+}
+
+async function ingestPolicy() {
+  const text = document.getElementById("policy-text").value.trim();
+  if (!text) return;
+  state.policy = text;
+  if (!hasApiKey()) { toast("Set GEMINI_API_KEY to auto-generate tree"); save(); closeModal(); return; }
+  toast("AI generating tree...");
+  const prompt = `You are a customer service knowledge architect. Parse the following company policy into a hierarchical tree of macros. Return STRICT JSON only, no prose, no markdown fences. Schema:
+{"tree":[{"type":"title","label":"...","children":[{"type":"macro","label":"...","text":"..."},{"type":"title","label":"...","children":[...]}]}]}
+Macro "text" should be a ready-to-send customer response, using [brackets] for dynamic placeholders. Titles group related macros.
+
+POLICY:
+${text}`;
+  const result = await aiGenerate(prompt);
+  try {
+    const cleaned = result.replace(/```json|```/g, "").trim();
+    const parsed = JSON.parse(cleaned);
+    const enNodes = normalizeTree(parsed.tree || []);
+    state.trees.en.push(...enNodes);
+    // Translate to Arabic
+    const arNodes = await deepTranslateTree(enNodes, "ar");
+    state.trees.ar.push(...arNodes);
+    linkMirrors(enNodes, arNodes);
+    save(); closeModal(); render(); toast("Policy ingested & translated");
+  } catch (e) {
+    console.error(e, result);
+    toast("AI returned invalid JSON. Policy saved as text.");
+    save(); closeModal();
+  }
+}
+
+function normalizeTree(nodes) {
+  return nodes.map(n => ({
+    id: uid(),
+    type: n.type === "title" ? "title" : "macro",
+    label: n.label || "Untitled",
+    text: n.text || "",
+    color: null,
+    children: normalizeTree(n.children || [])
+  }));
+}
+
+async function deepTranslateTree(nodes, targetLang) {
+  const out = [];
+  for (const n of nodes) {
+    out.push({
+      id: uid(),
+      type: n.type,
+      label: (await translateText(n.label, targetLang)) || n.label,
+      text: n.text ? ((await translateText(n.text, targetLang)) || n.text) : "",
+      color: n.color || null,
+      children: await deepTranslateTree(n.children || [], targetLang)
+    });
+  }
+  return out;
+}
+
+function linkMirrors(en, ar) {
+  for (let i = 0; i < en.length && i < ar.length; i++) {
+    setMirror(en[i].id, ar[i].id);
+    linkMirrors(en[i].children || [], ar[i].children || []);
+  }
+}
+
+/* ============================================================
+   AI SCAN / MATCHING
+   ============================================================ */
+async function aiScanMatches() {
+  const msg = document.getElementById("ai-scan-input").value.trim();
+  const box = document.getElementById("ai-scan-results");
+  if (!msg) return;
+  if (!hasApiKey()) {
+    // Fallback keyword match
+    const all = flattenMacros();
+    const kw = msg.toLowerCase().split(/\s+/);
+    const scored = all.map(m => ({
+      m, score: kw.reduce((s, w) => s + ((m.node.label + " " + m.node.text).toLowerCase().includes(w) ? 1 : 0), 0)
+    })).filter(x => x.score > 0).sort((a,b) => b.score - a.score).slice(0, 3);
+    box.innerHTML = scored.length ? scored.map(x => suggestionHtml(x.m)).join('') : '<p style="color:var(--muted); font-size:12px; margin-top:8px">No matches (set API key for AI matching).</p>';
+    return;
+  }
+  box.innerHTML = '<p style="color:var(--muted); font-size:12px">Scanning...</p>';
+  const macros = flattenMacros();
+  const list = macros.map((m, i) => `${i}: [${m.path.join(' › ')}] ${m.node.label} — ${m.node.text.slice(0,80)}`).join('\n');
+  const prompt = `Company policy: ${state.policy || 'none'}\n\nAvailable macros:\n${list}\n\nCustomer message: "${msg}"\n\nReturn the 3 best macro indices as JSON array of numbers only, e.g. [0,3,7]`;
+  const result = await aiGenerate(prompt);
+  try {
+    const idxs = JSON.parse(result.replace(/```json|```/g, '').trim());
+    const picks = idxs.map(i => macros[i]).filter(Boolean);
+    box.innerHTML = picks.map(m => suggestionHtml(m)).join('') || '<p style="color:var(--muted); font-size:12px">No matches.</p>';
+  } catch (e) {
+    box.innerHTML = '<p style="color:var(--danger); font-size:12px">AI parse error.</p>';
+  }
+}
+
+async function aiDraftReply() {
+  const msg = document.getElementById("ai-scan-input").value.trim();
+  const box = document.getElementById("ai-scan-results");
+  if (!msg) return;
+  if (!hasApiKey()) { toast("Set GEMINI_API_KEY first"); return; }
+  box.innerHTML = '<p style="color:var(--muted); font-size:12px">Drafting...</p>';
+  const macros = flattenMacros().map(m => `${m.node.label}: ${m.node.text}`).join('\n');
+  const prompt = `You are Mohammad's customer service assistant. Company policy: ${state.policy || 'none'}\n\nExisting macro tone reference:\n${macros}\n\nCustomer message: "${msg}"\n\nWrite ONE best reply in the same language as the customer message. Match professional, empathetic tone. Use [brackets] for placeholders. Return only the reply text.`;
+  const reply = await aiGenerate(prompt);
+  const safe = escapeHtml(reply || '').replace(/\n/g, '<br>');
+  box.innerHTML = `
+    <div class="suggestion">
+      <div class="path">AI Drafted Reply</div>
+      <div>${safe}</div>
+      <div class="actions">
+        <button class="btn sm" onclick="navigator.clipboard.writeText(${JSON.stringify(reply || '')}); toast('Copied')">📋 Copy</button>
+        <button class="btn sm primary" onclick='saveAiReplyToMacros(${JSON.stringify(reply || '')})'>+ Add to Macros</button>
+      </div>
+    </div>
+  `;
+}
+
+function saveAiReplyToMacros(text) {
+  openNodeModal({ parentId: null, forcedType: "macro", prefillText: text, prefillLabel: "" });
+}
+
+function flattenMacros(lang = state.lang) {
+  const out = [];
+  const walk = (nodes, path) => nodes.forEach(n => {
+    if (n.type === "macro") out.push({ node: n, path });
+    walk(n.children || [], [...path, n.label]);
+  });
+  walk(state.trees[lang], []);
+  return out;
+}
+
+function suggestionHtml(m) {
+  return `<div class="suggestion" onclick="state.activeId='${m.node.id}'; render();" style="cursor:pointer">
+    <div class="path">${escapeHtml(m.path.join(' › '))}</div>
+    <b>${escapeHtml(m.node.label)}</b>
+    <div style="color:var(--muted); font-size:12px; margin-top:4px">${escapeHtml((m.node.text || '').slice(0, 120))}${(m.node.text||'').length>120?'...':''}</div>
+  </div>`;
+}
+
+/* ============================================================
+   TONE REWRITE
+   ============================================================ */
+async function rewriteTone(tone) {
+  if (!hasApiKey()) { toast("Set GEMINI_API_KEY first"); return; }
+  const editor = document.getElementById("macro-editor");
+  const text = serializeEditor(editor);
+  toast(`Rewriting as ${tone}...`);
+  const prompt = `Rewrite this customer service message with a ${tone} tone. Preserve [bracket placeholders] exactly. Keep same language. Return only rewritten text:\n\n${text}`;
+  const out = await aiGenerate(prompt);
+  if (out) {
+    navigator.clipboard.writeText(out);
+    toast(`${tone} version copied`);
+  }
+}
+
+async function aiRewriteFromIntent() {
+  const intent = prompt("Describe the intent (e.g. 'push back about cancellation policy'):");
+  if (!intent) return;
+  if (!hasApiKey()) { toast("Set GEMINI_API_KEY first"); return; }
+  const draft = await aiGenerate(`Write a professional customer service macro in ${state.lang === 'ar' ? 'Arabic' : 'English'} for: ${intent}. Policy: ${state.policy || 'none'}. Use [brackets] for placeholders.`);
+  if (draft) {
+    const f = findNode(state.activeId);
+    if (f) { f.node.text = draft.trim(); render(); }
+  }
+}
+
+/* ============================================================
+   GEMINI API
+   ============================================================ */
+function hasApiKey() { return GEMINI_API_KEY && GEMINI_API_KEY !== "PASTE_YOUR_KEY_HERE"; }
+
+async function aiGenerate(prompt) {
+  if (!GEMINI_API_KEY || GEMINI_API_KEY === "PASTE_YOUR_KEY_HERE") {
+    toast("AI error: GEMINI_API_KEY is not set. Paste your Google AI Studio key at the top of the script.");
+    return null;
+  }
+  let res;
+  try {
+    // Auth keys (the "AQ." prefix) authenticate via the x-goog-api-key header,
+    // not the old "?key=" query param used by legacy AIza standard keys.
+    res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+    });
+  } catch (e) {
+    console.error(e);
+    toast("AI network error: " + (e.message || e) + ". Check your internet connection.");
+    return null;
+  }
+  let data;
+  try { data = await res.json(); } catch (e) {
+    toast("AI error: invalid response from Gemini (HTTP " + res.status + ").");
+    return null;
+  }
+  if (!res.ok) {
+    const msg = data?.error?.message || ("HTTP " + res.status);
+    const status = data?.error?.status ? " [" + data.error.status + "]" : "";
+    console.error("Gemini API error", data);
+    if (res.status === 400 && /API key/i.test(msg)) toast("AI error: invalid API key. Check GEMINI_API_KEY.");
+    else if (res.status === 403) toast("AI error: access denied — key lacks permission for " + GEMINI_MODEL + " (" + msg + ")");
+    else if (res.status === 404) toast("AI error: model '" + GEMINI_MODEL + "' not found. Update GEMINI_MODEL.");
+    else if (res.status === 429) toast("AI error: rate limit / quota exceeded. Wait and retry.");
+    else toast("AI error" + status + ": " + msg);
+    return null;
+  }
+  const candidate = data?.candidates?.[0];
+  const finishReason = candidate?.finishReason;
+  const text = candidate?.content?.parts?.[0]?.text || "";
+  if (!text) {
+    if (finishReason === "SAFETY") toast("AI error: response blocked by safety filters.");
+    else if (finishReason === "MAX_TOKENS") toast("AI error: response truncated (MAX_TOKENS). Try a shorter prompt.");
+    else if (finishReason === "RECITATION") toast("AI error: response blocked (RECITATION).");
+    else if (data?.promptFeedback?.blockReason) toast("AI error: prompt blocked — " + data.promptFeedback.blockReason);
+    else toast("AI error: empty response" + (finishReason ? " (" + finishReason + ")" : "") + ".");
+    console.error("Gemini empty response", data);
+    return null;
+  }
+  if (finishReason === "MAX_TOKENS") toast("Warning: AI response was truncated (MAX_TOKENS).");
+  return text;
+}
+
+async function translateText(text, targetLang) {
+  if (!text || !hasApiKey()) return text;
+  const target = targetLang === "ar" ? "Arabic" : "English";
+  const out = await aiGenerate(`Translate the following to natural, professional ${target}. Preserve [bracket placeholders] EXACTLY as-is. Return only the translation, no quotes, no notes:\n\n${text}`);
+  return out ? out.trim() : text;
+}
+
+/* ============================================================
+   UTILS
+   ============================================================ */
+function escapeHtml(s) {
+  return String(s || "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function toast(msg) {
+  const t = document.createElement("div");
+  t.className = "toast"; t.textContent = msg;
+  document.getElementById("toast-root").appendChild(t);
+  setTimeout(() => t.remove(), 4000);
+}
+
+function backupJSON() {
+  try {
+    const payload = { app: "mohammad-macro-playbook", version: 2, exportedAt: new Date().toISOString(), state };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `macro-playbook-backup-${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast("Backup downloaded");
+  } catch (e) { console.error(e); toast("Backup failed: " + e.message); }
+}
+
+function restoreJSON(event) {
+  const file = event.target.files && event.target.files[0];
+  event.target.value = "";
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const parsed = JSON.parse(reader.result);
+      const restored = parsed && parsed.state ? parsed.state : parsed;
+      if (!restored || !restored.trees) throw new Error("File is not a valid macro-playbook backup");
+      if (!confirm("Restore will REPLACE all current data. Continue?")) return;
+      Object.assign(state, restored);
+      save(); closeModal(); render(); toast("Backup restored");
+    } catch (e) { console.error(e); toast("Restore failed: " + e.message); }
+  };
+  reader.onerror = () => toast("Restore failed: could not read file");
+  reader.readAsText(file);
+}
+
+/* ============================================================
+   EVENTS
+   ============================================================ */
+document.querySelectorAll("#lang-toggle button").forEach(b => {
+  b.addEventListener("click", () => { state.lang = b.dataset.lang; state.activeId = null; render(); });
+});
+document.getElementById("search").addEventListener("input", renderTree);
+
+render();
+</script>
+</body>
+</html>
