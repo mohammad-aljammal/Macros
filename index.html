@@ -211,6 +211,42 @@
   .modal .row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
   .modal .row label { font-size: 12px; color: var(--muted); }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+  .modal.modal-lg { max-width: 720px; }
+
+  /* Customer badge selector (internal-only classification, not shown to customer) */
+  .cust-badge-row { display: flex; gap: 8px; margin: 4px 0 12px; flex-wrap: wrap; }
+  .cust-badge-btn {
+    padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border);
+    background: var(--panel-2); color: var(--muted); font-size: 12px; cursor: pointer;
+  }
+  .cust-badge-btn.active { border-color: var(--accent); color: var(--text); background: rgba(110,168,254,0.15); }
+
+  /* AI Assistant chat */
+  .assistant-log {
+    height: 320px; overflow-y: auto; background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px;
+  }
+  .chat-msg { display: flex; flex-direction: column; max-width: 85%; }
+  .chat-msg.user { align-self: flex-end; align-items: flex-end; }
+  .chat-msg.assistant { align-self: flex-start; align-items: flex-start; }
+  .chat-bubble { padding: 8px 11px; border-radius: 10px; font-size: 13px; line-height: 1.45; white-space: pre-wrap; }
+  .chat-msg.user .chat-bubble { background: rgba(110,168,254,0.18); border: 1px solid var(--accent); }
+  .chat-msg.assistant .chat-bubble { background: var(--panel); border: 1px solid var(--border); }
+  .chat-msg .btn.sm.ghost { margin-top: 3px; padding: 2px 6px; font-size: 11px; }
+  .assistant-input-row { display: flex; gap: 8px; align-items: flex-end; }
+  .assistant-input-row textarea { flex: 1; resize: vertical; }
+
+  /* Contact reason / log / hashtag packet */
+  .packet-field {
+    display: flex; align-items: flex-start; gap: 8px; background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px;
+  }
+  .packet-field label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+  .packet-field .packet-value { font-size: 13px; flex: 1; white-space: pre-wrap; }
+
+  /* AI Backend settings */
+  .backend-choice label { display: block; font-size: 13px; margin: 4px 0; cursor: pointer; }
+  #local-model-controls label { font-size: 12px; color: var(--muted); cursor: pointer; }
 
   /* Analytics */
   .stat-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed var(--border); font-size: 13px; }
@@ -240,6 +276,7 @@
     <button data-lang="ar">AR</button>
   </div>
   <button class="btn" onclick="openPolicyModal()">🧠 Ingest Policy</button>
+  <button class="btn" onclick="openAiAssistant()">🤖 AI Assistant</button>
   <button class="btn" onclick="openSettings()">⚙️ Settings</button>
 </div>
 
@@ -303,6 +340,19 @@ const API_KEY_STORAGE = "mohammad-macro-playbook-gemini-key";
 let GEMINI_API_KEY = localStorage.getItem(API_KEY_STORAGE) || "";
 const COLOR_PALETTE = ["#f07178", "#ffcb6b", "#7ee2b8", "#6ea8fe", "#c792ea", "#89ddff", "#ff8a65", "#9aa3b2"];
 
+// --- Local WebLLM engine state (not persisted — reloaded fresh each session) ---
+let localEngine = null;
+let localEngineModelId = null;
+const LOCAL_MODELS = {
+  "1.5b": "Qwen2.5-1.5B-Instruct-q4f16_1-MLC",
+  "7b": "Qwen2.5-7B-Instruct-q4f16_1-MLC"
+};
+
+// --- Internal-only customer badge, session-only by design (see README): every
+// fresh interaction defaults back to "grey" since most customers are unclassified.
+// NEVER surface this to the customer — it only steers internal AI tone/policy choice.
+let currentBadge = "grey";
+
 /* ============================================================
    STATE
    ============================================================ */
@@ -319,6 +369,9 @@ function loadState() {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (!parsed.pinnedFolders) parsed.pinnedFolders = [];
+      if (!parsed.policies) parsed.policies = [];
+      if (!parsed.aiBackend) parsed.aiBackend = "gemini";
+      if (!parsed.localModelSize) parsed.localModelSize = "1.5b";
       return parsed;
     }
   } catch (e) {}
@@ -333,6 +386,16 @@ function defaultState() {
     lang: "en",
     activeId: null,
     policy: "",
+    // Permanent database of raw ingested policy texts, used to ground every AI
+    // feature (chat, drafting, contact-reason/log/hashtag generation). Separate
+    // from the generated macro tree — this is the source text itself.
+    policies: [],
+    // Which AI backend powers all AI features. "gemini" = cloud (needs a key +
+    // internet). "local" = WebLLM running fully in this browser via WebGPU (needs
+    // no key, works offline, but needs the model downloaded once and capable
+    // hardware — see Settings → AI Backend).
+    aiBackend: "gemini",
+    localModelSize: "1.5b",
     favorites: [],
     usage: {},
     // Folder ids the user has explicitly pinned open; they stay expanded across reloads.
@@ -769,7 +832,7 @@ async function syncMirrorLabel(id) {
   const src = findNode(id); if (!src) return;
   const otherLang = state.lang === "en" ? "ar" : "en";
   const dst = findNodeInLang(mirrorId, otherLang); if (!dst) return;
-  if (hasApiKey()) {
+  if (aiReady()) {
     const translated = await translateText(src.node.label, otherLang);
     if (translated) dst.node.label = translated;
   }
@@ -846,7 +909,7 @@ async function aiDraftIntoModal() {
   const intent = document.getElementById("nm-intent").value.trim();
   if (!intent) { toast("Enter an intent first"); return; }
   toast("AI drafting...");
-  const draft = await aiGenerate(`You are a customer service macro writer. Write a short professional macro response in ${state.lang === 'ar' ? 'Arabic' : 'English'} for this intent. Use [brackets] for placeholders. Policy context: ${state.policy || 'none'}\n\nIntent: ${intent}`);
+  const draft = await aiGenerate(`You are a customer service macro writer. Write a short professional macro response in ${state.lang === 'ar' ? 'Arabic' : 'English'} — natural, professional Modern Standard Arabic if Arabic, never a stiff literal translation. Use [brackets] for placeholders.\n\nRelevant policy:\n${policyContextFor(intent)}\n\nIntent: ${intent}`);
   if (draft) document.getElementById("nm-text").value = draft.trim();
 }
 
@@ -872,8 +935,8 @@ async function submitNodeModal(parentId) {
     }
     const mirrorNode = {
       id: uid(), type,
-      label: hasApiKey() ? (await translateText(label, otherLang)) || label : label,
-      text: (type === "macro" && text && hasApiKey()) ? (await translateText(text, otherLang)) || text : text,
+      label: aiReady() ? (await translateText(label, otherLang)) || label : label,
+      text: (type === "macro" && text && aiReady()) ? (await translateText(text, otherLang)) || text : text,
       color: newNode.color,
       children: []
     };
@@ -921,9 +984,29 @@ function openSettings() {
     <div class="modal">
       <h3>⚙️ Settings & Analytics</h3>
       <div class="card">
+        <h4>🧠 AI Backend</h4>
+        <p style="color:var(--muted); font-size:12px; margin:0 0 8px">
+          Choose what powers Draft Reply, tone rewrites, AI Scan, the AI Assistant, and policy ingestion.
+          Both options can be switched any time; your Gemini key below stays saved either way.
+        </p>
+        <div class="backend-choice">
+          <label><input type="radio" name="ai-backend" value="gemini" ${state.aiBackend!=='local'?'checked':''} onchange="setAiBackend('gemini')"> ☁️ Google Gemini — cloud, needs a key and internet, generally best quality/speed</label>
+          <label><input type="radio" name="ai-backend" value="local" ${state.aiBackend==='local'?'checked':''} onchange="setAiBackend('local')"> 💻 Local AI (WebLLM) — runs fully in this browser, no key needed, works offline; needs a one-time model download and a capable GPU (see notes below)</label>
+        </div>
+        <div id="local-model-controls" style="${state.aiBackend==='local'?'':'display:none'}; margin-top:8px; padding-top:8px; border-top:1px dashed var(--border)">
+          <label><input type="radio" name="local-size" value="1.5b" ${state.localModelSize!=='7b'?'checked':''} onchange="setLocalModelSize('1.5b')"> Fast — Qwen2.5-1.5B (~1.5GB download, runs on most laptops incl. integrated graphics)</label><br>
+          <label><input type="radio" name="local-size" value="7b" ${state.localModelSize==='7b'?'checked':''} onchange="setLocalModelSize('7b')"> Quality — Qwen2.5-7B (~5GB download, needs a dedicated GPU with 6GB+ VRAM — most office desktops won't have this)</label>
+          <div style="margin-top:8px">
+            <button class="btn primary" onclick="loadLocalModel()">⬇️ Load Local Model</button>
+            <div id="local-model-status" style="font-size:12px; margin-top:6px; color:${localEngine ? 'var(--accent-2)' : 'var(--muted)'}">${localEngine ? '✓ Loaded: ' + localEngineModelId : 'Not loaded yet — click Load Local Model'}</div>
+            <div id="local-model-progress" style="font-size:11px; color:var(--muted); margin-top:4px"></div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
         <h4>🤖 AI (Gemini) Key</h4>
         <p style="color:var(--muted); font-size:12px; margin:0 0 8px">
-          Powers Draft Reply, tone rewrites, AI Scan matching, and policy ingestion.
+          Powers Draft Reply, tone rewrites, AI Scan matching, and policy ingestion when Gemini is the selected backend.
           Stored only in this browser's local storage — never saved into the page's
           source, never included in JSON backups, and never sent anywhere except
           directly to Google's Gemini API. Get a key at
@@ -938,6 +1021,18 @@ function openSettings() {
           <button class="btn danger" onclick="clearGeminiKey()">Clear Key</button>
           <span style="font-size:12px; color:${GEMINI_API_KEY ? 'var(--accent-2)' : 'var(--muted)'}">${GEMINI_API_KEY ? '✓ Key set — AI features active' : 'No key set — AI features disabled'}</span>
         </div>
+      </div>
+      <div class="card">
+        <h4>📚 Policy Database</h4>
+        <p style="color:var(--muted); font-size:12px; margin:0 0 8px">
+          Raw ingested policy text that grounds every AI feature. Delete anything outdated or wrong here.
+        </p>
+        ${state.policies.length ? state.policies.map(p => `
+          <div class="stat-row">
+            <span>${escapeHtml(p.title)} <span style="color:var(--muted); font-size:11px">(${(p.text||'').length} chars)</span></span>
+            <button class="btn sm danger" onclick="if(confirm('Delete policy &quot;${escapeHtml(p.title).replace(/"/g,'&quot;')}&quot;?')) deletePolicy('${p.id}')">Delete</button>
+          </div>
+        `).join('') : '<p style="color:var(--muted); font-size:12px">No policies ingested yet — use 🧠 Ingest Policy.</p>'}
       </div>
       <div class="card">
         <h4>📈 Velocity — Most Used</h4>
@@ -976,9 +1071,17 @@ function openPolicyModal() {
     <div class="modal">
       <h3>🧠 Ingest / Update Company Policy</h3>
       <p style="color:var(--muted); font-size:12px">
-        Paste raw policy text (e.g. cancellation, refund flow). AI will parse it into a title/sub-title/macro tree
-        and mirror the structure in Arabic. This policy also powers future AI suggestions.
+        Paste raw policy text (e.g. cancellation, refund flow, badge-specific rules, objection handling).
+        It's saved permanently to the policy database that grounds every AI feature (chat, drafting,
+        contact reason/log/hashtag) — that database takes priority over general AI judgment.
+        "Save &amp; Generate Tree" additionally asks the AI to organize it into a logically nested
+        folder/macro structure (sub-folders and sub-macros where the policy actually has sub-cases)
+        and mirrors it into Arabic.
       </p>
+      <div class="row">
+        <label>Policy Title (optional, helps you find it later)</label>
+        <input id="policy-title" type="text" placeholder="e.g. Late Delivery Policy" />
+      </div>
       <div class="row">
         <label>Policy Text</label>
         <textarea id="policy-text" rows="10" placeholder="e.g. Refunds: Customers may request refunds within 14 days...">${escapeHtml(state.policy)}</textarea>
@@ -988,25 +1091,81 @@ function openPolicyModal() {
         <button class="btn" onclick="savePolicyOnly()">Save Policy Only</button>
         <button class="btn primary" onclick="ingestPolicy()">Save & Generate Tree</button>
       </div>
+      <p style="color:var(--muted); font-size:11px; margin-top:10px">
+        ${state.policies.length} polic${state.policies.length === 1 ? 'y' : 'ies'} saved so far.
+        Manage or delete individual entries in ⚙️ Settings → Policy Database.
+      </p>
     </div>
   `;
   document.getElementById("modal-root").appendChild(modal);
 }
 
+// Adds (or keeps growing) the permanent policy database used to ground AI
+// features. This is deliberately separate from the generated macro tree —
+// it's the raw source text the AI reasons from, not the polished replies.
+function addPolicyRecord(title, text) {
+  state.policies.push({
+    id: uid(),
+    title: (title || "").trim() || ("Policy " + (state.policies.length + 1)),
+    text,
+    ingestedAt: new Date().toISOString()
+  });
+  save();
+}
+
+function deletePolicy(id) {
+  state.policies = state.policies.filter(p => p.id !== id);
+  save();
+  closeModal();
+  openSettings();
+}
+
+const POLICY_STOPWORDS = new Set(["the","a","an","is","are","was","were","to","of","and","or","in","on","for","with","this","that","it","be","if","we","our","you","your","i","he","she","they","them","his","her","its","from","as","at","by","not","no","do","does","did","has","have","had","will","would","can","could","should","must","اذا","في","من","الى","على","عن","هذا","هذه","و","او","ان","كان"]);
+
+// Cheap, dependency-free "poor man's RAG": scores saved policies by keyword
+// overlap with the query and returns the most relevant few. Returns [] when
+// nothing meaningfully matches, so callers fall back to general judgment
+// instead of stuffing in irrelevant policy text.
+function getRelevantPolicies(query, max = 3) {
+  if (!state.policies.length) return [];
+  const terms = (query || "").toLowerCase().split(/[^a-z0-9\u0600-\u06FF]+/i).filter(w => w.length > 2 && !POLICY_STOPWORDS.has(w));
+  if (!terms.length) return [];
+  const scored = state.policies.map(p => {
+    const hay = (p.title + " " + p.text).toLowerCase();
+    const score = terms.reduce((s, w) => s + (hay.includes(w) ? 1 : 0), 0);
+    return { p, score };
+  }).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
+  return scored.slice(0, max).map(x => x.p);
+}
+
+// Formats the most relevant saved policies (if any) into a text block ready
+// to drop into a prompt. Falls back to explicitly telling the AI nothing
+// matched, so it reasons from general judgment instead of guessing at policy.
+function policyContextFor(query) {
+  const rel = getRelevantPolicies(query, 3);
+  if (!rel.length) return "(No specific ingested policy matched this — use sound general customer-service judgment.)";
+  return rel.map(p => `[Policy: ${p.title}]\n${p.text}`).join("\n\n");
+}
+
 function savePolicyOnly() {
-  state.policy = document.getElementById("policy-text").value;
+  const text = document.getElementById("policy-text").value;
+  const title = document.getElementById("policy-title").value;
+  state.policy = text;
+  if (text.trim()) addPolicyRecord(title, text.trim());
   save(); closeModal(); toast("Policy saved");
 }
 
 async function ingestPolicy() {
   const text = document.getElementById("policy-text").value.trim();
+  const title = document.getElementById("policy-title").value;
   if (!text) return;
   state.policy = text;
-  if (!hasApiKey()) { toast("Add a Gemini key in ⚙️ Settings to auto-generate tree"); save(); closeModal(); return; }
+  addPolicyRecord(title, text);
+  if (!aiReady()) { aiNotReadyToast(); save(); closeModal(); return; }
   toast("AI generating tree...");
-  const prompt = `You are a customer service knowledge architect. Parse the following company policy into a hierarchical tree of macros. Return STRICT JSON only, no prose, no markdown fences. Schema:
+  const prompt = `You are a customer service knowledge architect. Parse the following company policy into a LOGICALLY NESTED hierarchy of folders (titles) and macros — do not flatten everything into one level. Group related scenarios under a shared parent title, and add a sub-title when a topic has multiple genuinely distinct sub-cases (e.g. "Late Delivery" branching into "20-45 minutes late" and "45+ minutes late" as separate macros or even separate sub-titles if each has several scenarios of its own). Only go as deep as the content actually warrants — a single flat macro is fine when there's no real sub-case. Return STRICT JSON only, no prose, no markdown fences. Schema:
 {"tree":[{"type":"title","label":"...","children":[{"type":"macro","label":"...","text":"..."},{"type":"title","label":"...","children":[...]}]}]}
-Macro "text" should be a ready-to-send customer response, using [brackets] for dynamic placeholders. Titles group related macros.
+Macro "text" should be a ready-to-send customer response — professional, warm, and firm where the policy requires holding a line, never generic or robotic-sounding. Use [brackets] for dynamic placeholders. Titles group related macros/sub-titles.
 
 POLICY:
 ${text}`;
@@ -1062,26 +1221,41 @@ function linkMirrors(en, ar) {
 }
 
 /* ============================================================
+   SHARED PERSONA / TONE / BADGE CONTEXT
+   Reused by AI Scan draft reply, the AI Assistant chat, and contact-packet
+   generation, so tone and badge-awareness stay consistent everywhere.
+   ============================================================ */
+const PERSONA_INSTRUCTIONS = `You are a professional customer service representative for a food delivery platform. Tone: warm and human, never robotic or generic — friendly by default, and firm (while staying respectful) when policy requires holding a line. When writing in Arabic, use natural, professional Modern Standard Arabic the way a well-trained bilingual support agent actually writes it — not a stiff literal translation, not overly classical/formal, and not casual slang. Match whichever language the customer used. Company policy (given below, if any) is the highest-priority source of truth; if nothing relevant was found, use sound customer-service judgment instead of inventing a policy.`;
+
+function badgeNoteFor(badge) {
+  return {
+    grey: "Customer badge (internal only, NEVER mention to the customer): GREY — default/unclassified. Apply standard policy and standard tone.",
+    red: "Customer badge (internal only, NEVER mention to the customer): RED — flagged internally for a history of abuse or bad-faith complaints. Apply policy strictly and minimally; do not offer discretionary goodwill beyond what policy requires. Stay professional and firm, not cold.",
+    gold: "Customer badge (internal only, NEVER mention to the customer): GOLD — flagged internally as a valuable, low-complaint customer. Lean toward the more generous end of what policy allows, and prioritize retention and warmth."
+  }[badge] || "";
+}
+
+/* ============================================================
    AI SCAN / MATCHING
    ============================================================ */
 async function aiScanMatches() {
   const msg = document.getElementById("ai-scan-input").value.trim();
   const box = document.getElementById("ai-scan-results");
   if (!msg) return;
-  if (!hasApiKey()) {
+  if (!aiReady()) {
     // Fallback keyword match
     const all = flattenMacros();
     const kw = msg.toLowerCase().split(/\s+/);
     const scored = all.map(m => ({
       m, score: kw.reduce((s, w) => s + ((m.node.label + " " + m.node.text).toLowerCase().includes(w) ? 1 : 0), 0)
     })).filter(x => x.score > 0).sort((a,b) => b.score - a.score).slice(0, 3);
-    box.innerHTML = scored.length ? scored.map(x => suggestionHtml(x.m)).join('') : '<p style="color:var(--muted); font-size:12px; margin-top:8px">No matches (set API key for AI matching).</p>';
+    box.innerHTML = scored.length ? scored.map(x => suggestionHtml(x.m)).join('') : '<p style="color:var(--muted); font-size:12px; margin-top:8px">No matches (set up an AI backend in ⚙️ Settings for smarter matching).</p>';
     return;
   }
   box.innerHTML = '<p style="color:var(--muted); font-size:12px">Scanning...</p>';
   const macros = flattenMacros();
   const list = macros.map((m, i) => `${i}: [${m.path.join(' › ')}] ${m.node.label} — ${m.node.text.slice(0,80)}`).join('\n');
-  const prompt = `Company policy: ${state.policy || 'none'}\n\nAvailable macros:\n${list}\n\nCustomer message: "${msg}"\n\nReturn the 3 best macro indices as JSON array of numbers only, e.g. [0,3,7]`;
+  const prompt = `Relevant policy:\n${policyContextFor(msg)}\n\nAvailable macros:\n${list}\n\nCustomer message: "${msg}"\n\nReturn the 3 best macro indices as JSON array of numbers only, e.g. [0,3,7]`;
   const result = await aiGenerate(prompt);
   try {
     const idxs = JSON.parse(result.replace(/```json|```/g, '').trim());
@@ -1096,10 +1270,10 @@ async function aiDraftReply() {
   const msg = document.getElementById("ai-scan-input").value.trim();
   const box = document.getElementById("ai-scan-results");
   if (!msg) return;
-  if (!hasApiKey()) { toast("Add a Gemini key in ⚙️ Settings first"); return; }
+  if (!aiReady()) { aiNotReadyToast(); return; }
   box.innerHTML = '<p style="color:var(--muted); font-size:12px">Drafting...</p>';
   const macros = flattenMacros().map(m => `${m.node.label}: ${m.node.text}`).join('\n');
-  const prompt = `You are Mohammad's customer service assistant. Company policy: ${state.policy || 'none'}\n\nExisting macro tone reference:\n${macros}\n\nCustomer message: "${msg}"\n\nWrite ONE best reply in the same language as the customer message. Match professional, empathetic tone. Use [brackets] for placeholders. Return only the reply text.`;
+  const prompt = `${PERSONA_INSTRUCTIONS}\n\n${badgeNoteFor(currentBadge)}\n\nRelevant policy:\n${policyContextFor(msg)}\n\nExisting macro tone reference (for style only, don't just copy one verbatim):\n${macros}\n\nCustomer message: "${msg}"\n\nWrite ONE best reply in the same language as the customer message. Use [brackets] for placeholders. Return only the reply text, no commentary.`;
   const reply = await aiGenerate(prompt);
   const safe = escapeHtml(reply || '').replace(/\n/g, '<br>');
   box.innerHTML = `
@@ -1137,14 +1311,135 @@ function suggestionHtml(m) {
 }
 
 /* ============================================================
+   AI ASSISTANT — interactive chat grounded in the policy database,
+   with customer-badge awareness and contact reason/log/hashtag generation.
+   ============================================================ */
+// Conversation history is session-only by design (matches the badge default
+// resetting to "grey" each session) — closing/reopening the tab starts fresh.
+let assistantHistory = [];
+
+function setCustomerBadge(b) {
+  currentBadge = b;
+  document.querySelectorAll(".cust-badge-btn").forEach(el => {
+    el.classList.toggle("active", el.dataset.badge === b);
+  });
+}
+
+function buildAssistantSystemPrompt(queryForRelevance) {
+  return `${PERSONA_INSTRUCTIONS}
+
+${badgeNoteFor(currentBadge)}
+
+Relevant ingested company policy (highest-priority source of truth when it applies):
+${policyContextFor(queryForRelevance)}
+
+You're chatting with the support agent (not the customer) inside their internal macro tool. They may paste a customer's message and ask for a reply, ask a general question, or ask you to help reason through a case. If you're missing a detail you'd need to give a confident, correct answer (e.g. "did the customer confirm the item was missing, or just late?"), ask ONE short clarifying question instead of guessing. When you do give a reply meant to be sent to the customer, write it entirely in the customer's language, make it copy-paste ready, and don't wrap it in commentary or labels.`;
+}
+
+function openAiAssistant() {
+  const modal = document.createElement("div");
+  modal.className = "modal-backdrop";
+  modal.innerHTML = `
+    <div class="modal modal-lg">
+      <h3>🤖 AI Assistant</h3>
+      <p style="color:var(--muted); font-size:12px; margin-top:-6px">
+        Ask anything, or paste a customer message and ask for a reply. Grounded in your ingested policies
+        first, general judgment otherwise. The badge below is internal-only — it's never shown or hinted to the customer.
+      </p>
+      <div class="cust-badge-row">
+        <button type="button" class="cust-badge-btn ${currentBadge==='grey'?'active':''}" data-badge="grey" onclick="setCustomerBadge('grey')">⚪ Grey (default)</button>
+        <button type="button" class="cust-badge-btn ${currentBadge==='red'?'active':''}" data-badge="red" onclick="setCustomerBadge('red')">🔴 Red</button>
+        <button type="button" class="cust-badge-btn ${currentBadge==='gold'?'active':''}" data-badge="gold" onclick="setCustomerBadge('gold')">⭐ Gold</button>
+      </div>
+      <div id="assistant-log" class="assistant-log"></div>
+      <div class="assistant-input-row">
+        <textarea id="assistant-input" rows="2" placeholder="Ask anything, or paste a customer message..." onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault(); sendAssistantMessage();}"></textarea>
+        <button class="btn primary" onclick="sendAssistantMessage()">Send</button>
+      </div>
+      <div class="modal-actions" style="justify-content:space-between; margin-top:12px">
+        <button class="btn ghost" onclick="assistantHistory=[]; renderAssistantChat(); document.getElementById('contact-packet-results').innerHTML='';">Clear Chat</button>
+        <div style="display:flex; gap:8px">
+          <button class="btn" onclick="generateContactPacket()">📋 Generate Contact Reason / Log / Hashtag</button>
+          <button class="btn ghost" onclick="closeModal()">Close</button>
+        </div>
+      </div>
+      <div id="contact-packet-results" style="margin-top:10px"></div>
+    </div>
+  `;
+  document.getElementById("modal-root").appendChild(modal);
+  renderAssistantChat();
+}
+
+function renderAssistantChat() {
+  const log = document.getElementById("assistant-log");
+  if (!log) return;
+  log.innerHTML = assistantHistory.map(m => `
+    <div class="chat-msg ${m.role}">
+      <div class="chat-bubble">${escapeHtml(m.content)}</div>
+      ${m.role === "assistant" ? `<button class="btn sm ghost" onclick="navigator.clipboard.writeText(${JSON.stringify(m.content)}); toast('Copied')">📋 Copy</button>` : ""}
+    </div>
+  `).join("") || `<p style="color:var(--muted); font-size:12px">No messages yet — ask anything or paste a customer message above.</p>`;
+  log.scrollTop = log.scrollHeight;
+}
+
+async function sendAssistantMessage() {
+  const input = document.getElementById("assistant-input");
+  const msg = (input.value || "").trim();
+  if (!msg) return;
+  if (!aiReady()) { aiNotReadyToast(); return; }
+  assistantHistory.push({ role: "user", content: msg });
+  input.value = "";
+  renderAssistantChat();
+  const sys = buildAssistantSystemPrompt(msg);
+  const messages = [{ role: "system", content: sys }, ...assistantHistory.slice(-12)];
+  const reply = await aiChat(messages);
+  if (reply) {
+    assistantHistory.push({ role: "assistant", content: reply.trim() });
+    renderAssistantChat();
+  }
+}
+
+async function generateContactPacket() {
+  const box = document.getElementById("contact-packet-results");
+  if (!assistantHistory.length) { toast("Chat about the case first, then generate the packet."); return; }
+  if (!aiReady()) { aiNotReadyToast(); return; }
+  box.innerHTML = '<p style="color:var(--muted); font-size:12px">Generating...</p>';
+  const transcript = assistantHistory.map(m => `${m.role === "user" ? "Agent" : "Assistant"}: ${m.content}`).join("\n");
+  const sys = buildAssistantSystemPrompt(transcript);
+  const prompt = `${sys}
+
+Based on the conversation below, produce STRICT JSON only (no markdown fences, no prose) with exactly this shape:
+{"contactReason":"short 2-6 word phrase, e.g. 'Order marked delivered, not received'","log":"2-4 sentence professional internal log: what happened and how it was resolved, written the way a real support log should read since the customer can request it","hashtag":"#OneWordOrCamelCaseClassificationTag"}
+
+Conversation:
+${transcript}`;
+  const out = await aiGenerate(prompt);
+  try {
+    const parsed = JSON.parse((out || "").replace(/```json|```/g, "").trim());
+    box.innerHTML = ["contactReason","log","hashtag"].map(key => `
+      <div class="packet-field">
+        <div style="flex:1">
+          <label>${key === "contactReason" ? "Contact Reason" : key === "log" ? "Log" : "Hashtag"}</label>
+          <div class="packet-value">${escapeHtml(parsed[key] || "")}</div>
+        </div>
+        <button class="btn sm" onclick="navigator.clipboard.writeText(${JSON.stringify(parsed[key] || "")}); toast('Copied')">📋</button>
+      </div>
+    `).join("");
+  } catch (e) {
+    console.error(e, out);
+    box.innerHTML = '<p style="color:var(--danger); font-size:12px">Could not parse the AI output — try again.</p>';
+  }
+}
+
+/* ============================================================
    TONE REWRITE
    ============================================================ */
 async function rewriteTone(tone) {
-  if (!hasApiKey()) { toast("Add a Gemini key in ⚙️ Settings first"); return; }
+  if (!aiReady()) { aiNotReadyToast(); return; }
   const editor = document.getElementById("macro-editor");
   const text = serializeEditor(editor);
   toast(`Rewriting as ${tone}...`);
-  const prompt = `Rewrite this customer service message with a ${tone} tone. Preserve [bracket placeholders] exactly. Keep same language. Return only rewritten text:\n\n${text}`;
+  const prompt = `Rewrite this customer service message with a ${tone} tone. Preserve [bracket placeholders] exactly. Keep the same language — if it's Arabic, use natural professional Modern Standard Arabic, not a stiff literal rewrite. Return only rewritten text:\n\n${text}`;
   const out = await aiGenerate(prompt);
   if (out) {
     navigator.clipboard.writeText(out);
@@ -1155,8 +1450,8 @@ async function rewriteTone(tone) {
 async function aiRewriteFromIntent() {
   const intent = prompt("Describe the intent (e.g. 'push back about cancellation policy'):");
   if (!intent) return;
-  if (!hasApiKey()) { toast("Add a Gemini key in ⚙️ Settings first"); return; }
-  const draft = await aiGenerate(`Write a professional customer service macro in ${state.lang === 'ar' ? 'Arabic' : 'English'} for: ${intent}. Policy: ${state.policy || 'none'}. Use [brackets] for placeholders.`);
+  if (!aiReady()) { aiNotReadyToast(); return; }
+  const draft = await aiGenerate(`Write a professional customer service macro in ${state.lang === 'ar' ? 'Arabic' : 'English'} for: ${intent}. Use [brackets] for placeholders. If Arabic, use natural professional Modern Standard Arabic, not a literal translation.\n\nRelevant policy:\n${policyContextFor(intent)}`);
   if (draft) {
     const f = findNode(state.activeId);
     if (f) { f.node.text = draft.trim(); render(); }
@@ -1164,9 +1459,20 @@ async function aiRewriteFromIntent() {
 }
 
 /* ============================================================
-   GEMINI API
+   AI BACKEND — Gemini (cloud) or WebLLM (local, in-browser)
+   Everything else in the app calls aiGenerate()/aiChat() and doesn't care
+   which backend is active; this section is the only place that knows.
    ============================================================ */
 function hasApiKey() { return !!GEMINI_API_KEY; }
+
+// True if the CURRENTLY SELECTED backend is actually usable right now.
+function aiReady() {
+  return state.aiBackend === "local" ? !!localEngine : hasApiKey();
+}
+function aiNotReadyToast() {
+  if (state.aiBackend === "local") toast("Local AI model not loaded. Go to ⚙️ Settings → AI Backend and click Load Model.");
+  else toast("Add a Gemini key in ⚙️ Settings first.");
+}
 
 function saveGeminiKey() {
   const val = (document.getElementById("gemini-key-input").value || "").trim();
@@ -1186,11 +1492,90 @@ function clearGeminiKey() {
   openSettings();
 }
 
+function setAiBackend(v) {
+  state.aiBackend = v;
+  save();
+  const ctrl = document.getElementById("local-model-controls");
+  if (ctrl) ctrl.style.display = v === "local" ? "" : "none";
+}
+
+function setLocalModelSize(v) {
+  state.localModelSize = v;
+  save();
+}
+
+async function ensureLocalEngine(onProgress) {
+  const modelId = LOCAL_MODELS[state.localModelSize] || LOCAL_MODELS["1.5b"];
+  if (localEngine && localEngineModelId === modelId) return localEngine;
+  const webllm = await import("https://esm.run/@mlc-ai/web-llm");
+  localEngine = await webllm.CreateMLCEngine(modelId, {
+    initProgressCallback: (p) => onProgress && onProgress(p)
+  });
+  localEngineModelId = modelId;
+  return localEngine;
+}
+
+async function loadLocalModel() {
+  const statusEl = document.getElementById("local-model-status");
+  const progEl = document.getElementById("local-model-progress");
+  if (!navigator.gpu) {
+    if (statusEl) statusEl.textContent = "Not supported.";
+    toast("This browser/device doesn't support WebGPU, so the local model can't run. Try the latest Chrome or Edge on a desktop.");
+    return;
+  }
+  if (statusEl) statusEl.textContent = "Loading — first load downloads the model (can take a while)...";
+  try {
+    await ensureLocalEngine((p) => { if (progEl) progEl.textContent = p.text || (Math.round((p.progress || 0) * 100) + "%"); });
+    if (statusEl) statusEl.textContent = "✓ Loaded: " + localEngineModelId;
+    if (progEl) progEl.textContent = "";
+    toast("Local AI model ready");
+  } catch (e) {
+    console.error(e);
+    if (statusEl) statusEl.textContent = "Failed to load.";
+    toast("Local AI load error: " + (e.message || e));
+  }
+}
+
+// Serial queue so overlapping AI calls (e.g. tree generation firing many
+// translate calls back to back) never run concurrently against either backend.
+let aiQueue = Promise.resolve();
+function queueAiCall(fn) {
+  const run = aiQueue.then(fn, fn);
+  aiQueue = run.then(() => {}, () => {});
+  return run;
+}
+
+// Convenience wrapper for the many call sites that just want text back from a
+// single prompt string. Internally normalizes to the messages-based aiChat().
 async function aiGenerate(prompt) {
+  return aiChat([{ role: "user", content: prompt }]);
+}
+
+// Unified entry point: messages = [{role: "system"|"user"|"assistant", content}]
+async function aiChat(messages) {
+  return queueAiCall(() => state.aiBackend === "local" ? aiChatLocal(messages) : aiChatGemini(messages));
+}
+
+let lastGeminiCallAt = 0;
+const GEMINI_MIN_GAP_MS = 4500; // keeps well under Gemini free-tier's ~10-15 requests/minute ceiling
+
+async function aiChatGemini(messages) {
   if (!GEMINI_API_KEY) {
     toast("AI error: no Gemini API key set. Add one in ⚙️ Settings → AI (Gemini) Key.");
     return null;
   }
+  const waitFor = GEMINI_MIN_GAP_MS - (Date.now() - lastGeminiCallAt);
+  if (waitFor > 0) await new Promise(r => setTimeout(r, waitFor));
+  lastGeminiCallAt = Date.now();
+
+  const systemParts = messages.filter(m => m.role === "system").map(m => m.content);
+  const contents = messages.filter(m => m.role !== "system").map(m => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: m.content }]
+  }));
+  const body = { contents };
+  if (systemParts.length) body.systemInstruction = { parts: [{ text: systemParts.join("\n\n") }] };
+
   let res;
   try {
     // Auth keys (the "AQ." prefix) authenticate via the x-goog-api-key header,
@@ -1198,7 +1583,7 @@ async function aiGenerate(prompt) {
     res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+      body: JSON.stringify(body)
     });
   } catch (e) {
     console.error(e);
@@ -1217,7 +1602,7 @@ async function aiGenerate(prompt) {
     if (res.status === 400 && /API key/i.test(msg)) toast("AI error: invalid API key. Check it in ⚙️ Settings.");
     else if (res.status === 403) toast("AI error: access denied — key lacks permission for " + GEMINI_MODEL + " (" + msg + ")");
     else if (res.status === 404) toast("AI error: model '" + GEMINI_MODEL + "' not found. Update GEMINI_MODEL.");
-    else if (res.status === 429) toast("AI error: rate limit / quota exceeded. Wait and retry.");
+    else if (res.status === 429) toast("AI error: rate limit / quota exceeded. Waiting a bit longer between requests — try again in a moment.");
     else toast("AI error" + status + ": " + msg);
     return null;
   }
@@ -1237,10 +1622,27 @@ async function aiGenerate(prompt) {
   return text;
 }
 
+async function aiChatLocal(messages) {
+  if (!localEngine) {
+    toast("Local AI model not loaded. Go to ⚙️ Settings → AI Backend and click Load Model.");
+    return null;
+  }
+  try {
+    const res = await localEngine.chat.completions.create({ messages, temperature: 0.7 });
+    return res?.choices?.[0]?.message?.content || "";
+  } catch (e) {
+    console.error(e);
+    toast("Local AI error: " + (e.message || e));
+    return null;
+  }
+}
+
 async function translateText(text, targetLang) {
-  if (!text || !hasApiKey()) return text;
-  const target = targetLang === "ar" ? "Arabic" : "English";
-  const out = await aiGenerate(`Translate the following to natural, professional ${target}. Preserve [bracket placeholders] EXACTLY as-is. Return only the translation, no quotes, no notes:\n\n${text}`);
+  if (!text || !aiReady()) return text;
+  const instruction = targetLang === "ar"
+    ? "Translate the following into natural, professional Modern Standard Arabic, the way a well-trained bilingual customer service agent would actually write it — not a stiff, literal machine translation, and not casual slang."
+    : "Translate the following into natural, professional English customer-service writing.";
+  const out = await aiGenerate(`${instruction} Preserve [bracket placeholders] EXACTLY as-is, untranslated. Return only the translation, no quotes, no notes:\n\n${text}`);
   return out ? out.trim() : text;
 }
 

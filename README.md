@@ -35,25 +35,59 @@ browser's `localStorage`, scoped to whatever URL you're viewing the app from.
 won't share data — use **Settings → Backup JSON** to export/import between
 them.
 
-## AI features (optional)
+## AI features
 
-AI drafting, tone rewriting, translation, and policy ingestion use the Gemini
-API. Nothing is hardcoded in `index.html` — open the app, click **⚙️ Settings**,
-and paste a key into the **AI (Gemini) Key** card. Get a free key at
-[aistudio.google.com/apikey](https://aistudio.google.com/apikey).
+AI drafting, tone rewriting, translation, macro matching, policy ingestion,
+and the AI Assistant chat can run on **either** of two backends, switchable
+any time in **⚙️ Settings → AI Backend**:
 
-The key is stored only in that browser's `localStorage`. It is never written
-into `index.html`, never committed to this repo, and never included in
-**Backup JSON** exports — so it can't leak through git history or GitHub's
-public secret scanning the way a hardcoded key would. It's local to whichever
-browser/device you enter it on; enter it again on each device you use.
+- **☁️ Google Gemini** (cloud) — needs an API key (Settings → AI (Gemini) Key)
+  and internet, generally the fastest/highest-quality option.
+- **💻 Local AI (WebLLM)** — runs the Qwen2.5 model entirely inside your
+  browser via WebGPU. No key, no internet needed once loaded, nothing ever
+  leaves your machine. Two sizes:
+  - **1.5B ("Fast")** — ~1.5GB download, runs on most laptops including
+    integrated graphics. Lower quality ceiling than Gemini or the 7B model.
+  - **7B ("Quality")** — ~5GB download, needs a dedicated GPU with roughly
+    6GB+ VRAM. Most office desktops (integrated graphics only) will struggle
+    or fail to load this — check your actual hardware before relying on it.
 
-If you ever paste a key into a *hardcoded* copy of this file and push it to a
-public GitHub repo, assume it will be auto-detected and revoked by Google
-within minutes — GitHub's secret scanning partner program actively watches
-public repos for exactly this. Keep using the Settings field instead.
+Get a Gemini key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
+The key is stored only in this browser's `localStorage` — never written into
+`index.html`, never committed to this repo, never included in **Backup JSON**
+exports. If you ever hardcode a key into a copy of this file and push it to
+a public GitHub repo, assume it gets auto-detected and revoked within
+minutes — GitHub's secret scanning partner program actively watches for
+exactly that. Keep using the Settings field instead.
+
+### Policy Database
+
+**🧠 Ingest Policy** saves whatever you paste into a permanent policy
+database (visible/deletable in **⚙️ Settings → Policy Database**) that grounds
+every AI feature — it's checked first, and the AI falls back to general
+customer-service judgment only when nothing relevant is found. "Save & Generate
+Tree" additionally asks the AI to organize the policy into a logically nested
+folder/macro structure (sub-folders and sub-macros where the policy actually
+has sub-cases) and mirrors it into Arabic.
+
+### Customer Badges (internal only)
+
+The AI Assistant has an internal-only customer classification toggle —
+⚪ Grey (default, most customers), 🔴 Red (flagged for abuse/bad-faith history),
+⭐ Gold (valuable, low-complaint). It resets to Grey every session. This is
+never shown or hinted to the customer; it only steers how firmly vs.
+generously the AI applies policy internally.
+
+### AI Assistant
+
+**🤖 AI Assistant** in the top bar opens an interactive chat: ask anything,
+paste a customer message for a ready-to-send reply, or work through a case —
+it will ask a clarifying question first if it's missing something it needs.
+**Generate Contact Reason / Log / Hashtag** turns the current chat into three
+copyable fields for your case documentation.
 
 ## Backup & restore
 
 Settings (⚙️ in the top bar) has JSON export/import so you can move your
-macro library between devices or browsers.
+macro library between devices or browsers. The policy database travels with
+it; your Gemini key and local-model choice do not (by design — see above).
