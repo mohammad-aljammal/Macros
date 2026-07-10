@@ -344,8 +344,12 @@ const COLOR_PALETTE = ["#f07178", "#ffcb6b", "#7ee2b8", "#6ea8fe", "#c792ea", "#
 let localEngine = null;
 let localEngineModelId = null;
 const LOCAL_MODELS = {
-  "1.5b": "Qwen2.5-1.5B-Instruct-q4f16_1-MLC",
-  "7b": "Qwen2.5-7B-Instruct-q4f16_1-MLC"
+  // q4f32_1 (not q4f16_1) deliberately — the f16 variant requires the WebGPU
+  // "shader-f16" feature, which isn't supported on every GPU/driver and causes
+  // an "Invalid ShaderModule" compile error on ones that lack it. f32 has no
+  // such requirement, at the cost of a somewhat bigger download/VRAM footprint.
+  "1.5b": "Qwen2.5-1.5B-Instruct-q4f32_1-MLC",
+  "7b": "Qwen2.5-7B-Instruct-q4f32_1-MLC"
 };
 
 // --- Internal-only customer badge, session-only by design (see README): every
@@ -994,8 +998,8 @@ function openSettings() {
           <label><input type="radio" name="ai-backend" value="local" ${state.aiBackend==='local'?'checked':''} onchange="setAiBackend('local')"> 💻 Local AI (WebLLM) — runs fully in this browser, no key needed, works offline; needs a one-time model download and a capable GPU (see notes below)</label>
         </div>
         <div id="local-model-controls" style="${state.aiBackend==='local'?'':'display:none'}; margin-top:8px; padding-top:8px; border-top:1px dashed var(--border)">
-          <label><input type="radio" name="local-size" value="1.5b" ${state.localModelSize!=='7b'?'checked':''} onchange="setLocalModelSize('1.5b')"> Fast — Qwen2.5-1.5B (~1.5GB download, runs on most laptops incl. integrated graphics)</label><br>
-          <label><input type="radio" name="local-size" value="7b" ${state.localModelSize==='7b'?'checked':''} onchange="setLocalModelSize('7b')"> Quality — Qwen2.5-7B (~5GB download, needs a dedicated GPU with 6GB+ VRAM — most office desktops won't have this)</label>
+          <label><input type="radio" name="local-size" value="1.5b" ${state.localModelSize!=='7b'?'checked':''} onchange="setLocalModelSize('1.5b')"> Fast — Qwen2.5-1.5B (~1.9GB download, broad GPU compatibility, runs on most laptops incl. integrated graphics)</label><br>
+          <label><input type="radio" name="local-size" value="7b" ${state.localModelSize==='7b'?'checked':''} onchange="setLocalModelSize('7b')"> Quality — Qwen2.5-7B (~5.9GB download, needs a dedicated GPU with 6GB+ VRAM — most office desktops won't have this)</label>
           <div style="margin-top:8px">
             <button class="btn primary" onclick="loadLocalModel()">⬇️ Load Local Model</button>
             <div id="local-model-status" style="font-size:12px; margin-top:6px; color:${localEngine ? 'var(--accent-2)' : 'var(--muted)'}">${localEngine ? '✓ Loaded: ' + localEngineModelId : 'Not loaded yet — click Load Local Model'}</div>
@@ -1532,7 +1536,14 @@ async function loadLocalModel() {
   } catch (e) {
     console.error(e);
     if (statusEl) statusEl.textContent = "Failed to load.";
-    toast("Local AI load error: " + (e.message || e));
+    const msg = String(e.message || e);
+    if (/ShaderModule|shader-f16|entryPoint/i.test(msg)) {
+      toast("Local AI load error: your GPU/driver rejected a required shader. Try updating your graphics driver, or try the other model size — this is a hardware/driver compatibility issue, not something fixable in the page itself.");
+    } else if (/out of memory|OOM/i.test(msg)) {
+      toast("Local AI load error: ran out of GPU memory. Try the smaller (1.5B) model instead of 7B.");
+    } else {
+      toast("Local AI load error: " + msg);
+    }
   }
 }
 
