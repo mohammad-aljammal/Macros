@@ -1279,14 +1279,20 @@ async function aiDraftReply() {
   const macros = flattenMacros().map(m => `${m.node.label}: ${m.node.text}`).join('\n');
   const prompt = `${PERSONA_INSTRUCTIONS}\n\n${badgeNoteFor(currentBadge)}\n\nRelevant policy:\n${policyContextFor(msg)}\n\nExisting macro tone reference (for style only, don't just copy one verbatim):\n${macros}\n\nCustomer message: "${msg}"\n\nWrite ONE best reply in the same language as the customer message. Use [brackets] for placeholders. Return only the reply text, no commentary.`;
   const reply = await aiGenerate(prompt);
-  const safe = escapeHtml(reply || '').replace(/\n/g, '<br>');
+  if (!reply) {
+    // aiGenerate/aiChat already toasted the specific error — don't render a
+    // card that looks like a successful draft when nothing actually came back.
+    box.innerHTML = '<p style="color:var(--danger); font-size:12px">Drafting failed — see the error above.</p>';
+    return;
+  }
+  const safe = escapeHtml(reply).replace(/\n/g, '<br>');
   box.innerHTML = `
     <div class="suggestion">
       <div class="path">AI Drafted Reply</div>
       <div>${safe}</div>
       <div class="actions">
-        <button class="btn sm" onclick="navigator.clipboard.writeText(${JSON.stringify(reply || '')}); toast('Copied')">📋 Copy</button>
-        <button class="btn sm primary" onclick='saveAiReplyToMacros(${JSON.stringify(reply || '')})'>+ Add to Macros</button>
+        <button class="btn sm" onclick="navigator.clipboard.writeText(${JSON.stringify(reply)}); toast('Copied')">📋 Copy</button>
+        <button class="btn sm primary" onclick='saveAiReplyToMacros(${JSON.stringify(reply)})'>+ Add to Macros</button>
       </div>
     </div>
   `;
@@ -1418,8 +1424,13 @@ Based on the conversation below, produce STRICT JSON only (no markdown fences, n
 Conversation:
 ${transcript}`;
   const out = await aiGenerate(prompt);
+  if (!out) {
+    // aiGenerate/aiChat already toasted the specific error
+    box.innerHTML = '<p style="color:var(--danger); font-size:12px">Generation failed — see the error above.</p>';
+    return;
+  }
   try {
-    const parsed = JSON.parse((out || "").replace(/```json|```/g, "").trim());
+    const parsed = JSON.parse(out.replace(/```json|```/g, "").trim());
     box.innerHTML = ["contactReason","log","hashtag"].map(key => `
       <div class="packet-field">
         <div style="flex:1">
@@ -1643,7 +1654,29 @@ async function aiChatLocal(messages) {
     return res?.choices?.[0]?.message?.content || "";
   } catch (e) {
     console.error(e);
-    toast("Local AI error: " + (e.message || e));
+    const msg = String(e.message || e);
+    // WebLLM occasionally drops its loaded-model state mid-session (e.g. after
+    // the WebGPU device is reclaimed while the tab was backgrounded). Its own
+    // suggested fix is to reload — do that automatically once before giving up.
+    if (/model not loaded|reload\(model\)/i.test(msg)) {
+      toast("Local model session dropped — reloading from cache (fast, no re-download needed)...");
+      localEngine = null;
+      try {
+        await ensureLocalEngine((p) => {
+          // Best-effort: if Settings happens to be open, reflect progress there too.
+          const progEl = document.getElementById("local-model-progress");
+          if (progEl) progEl.textContent = p.text || (Math.round((p.progress || 0) * 100) + "%");
+        });
+        toast("Local model reloaded — retrying now...");
+        const res = await localEngine.chat.completions.create({ messages, temperature: 0.7 });
+        return res?.choices?.[0]?.message?.content || "";
+      } catch (e2) {
+        console.error(e2);
+        toast("Local AI error after reload attempt: " + (e2.message || e2) + ". Try clicking Load Local Model again in ⚙️ Settings.");
+        return null;
+      }
+    }
+    toast("Local AI error: " + msg);
     return null;
   }
 }
