@@ -75,16 +75,20 @@
   /* Tree */
   .node { margin: 2px 0; }
   .node-row {
-    display: flex; align-items: center; gap: 6px;
+    display: flex; align-items: flex-start; gap: 6px;
     padding: 6px 8px; border-radius: 6px; cursor: pointer;
     border: 1px solid transparent;
   }
   .node-row:hover { background: var(--panel-2); }
   .node-row.active { background: var(--panel-2); border-color: var(--accent); }
-  .node-row .caret { width: 14px; color: var(--muted); font-size: 10px; user-select: none; }
-  .node-row .icon { width: 16px; text-align: center; color: var(--muted); }
-  .node-row .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .node-row .fav { color: var(--warn); }
+  .node-row.kbd-focus { border-color: var(--warn); box-shadow: 0 0 0 1px var(--warn) inset; }
+  .node-row.flash-row { animation: rowflash 0.9s ease; }
+  @keyframes rowflash { 0%,100% { background: var(--panel-2); } 40% { background: rgba(110,168,254,0.3); } }
+  .node-row .caret { width: 14px; color: var(--muted); font-size: 10px; user-select: none; margin-top: 3px; }
+  .node-row .icon { width: 16px; text-align: center; color: var(--muted); margin-top: 1px; }
+  .node-row .label { flex: 1; white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
+  .node-row .color-dot { margin-top: 4px; }
+  .node-row .fav { color: var(--warn); margin-top: 1px; }
   .node-row .actions { display: none; gap: 2px; }
   .node-row:hover .actions { display: inline-flex; }
   .node-row .actions button {
@@ -184,6 +188,8 @@
   .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
   .tone-btn { background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); padding: 5px 10px; border-radius: 999px; font-size: 12px; }
   .tone-btn:hover { color: var(--text); border-color: var(--accent); }
+  .tone-btn-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .tone-btn-row .tone-btn, .tone-btn-row .btn.sm { font-size: 11px; padding: 3px 8px; }
 
   /* Right column */
   .card {
@@ -366,6 +372,12 @@ let state = loadState();
 // Toggling a folder open/closed during a session updates this set; it resets
 // on refresh, per the requested behavior.
 let sessionExpanded = new Set(state.pinnedFolders || []);
+// Which node the keyboard up/down cursor is currently on (separate from
+// state.activeId, which is "what's open in the center panel"). Session-only.
+let kbdFocusId = null;
+// Set right before a render() call whose result should auto-scroll into view
+// (search-result clicks, AI match clicks, keyboard navigation).
+let pendingScrollToId = null;
 
 function loadState() {
   try {
@@ -485,6 +497,41 @@ function render() {
   renderCenter();
   renderFavorites();
   save();
+  if (pendingScrollToId) {
+    const id = pendingScrollToId;
+    pendingScrollToId = null;
+    scrollNodeIntoView(id);
+  }
+}
+
+/* Scrolls a tree row into view and gives it a brief highlight flash so it's
+   obvious which item search/AI-match/keyboard navigation just landed on. */
+function scrollNodeIntoView(id) {
+  requestAnimationFrame(() => {
+    const el = document.querySelector(`.node-row[data-id="${CSS.escape(id)}"]`);
+    if (!el) return;
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    el.classList.add("flash-row");
+    setTimeout(() => el.classList.remove("flash-row"), 900);
+  });
+}
+
+/* Opens a node the same way clicking it would (expand if it's a folder, or
+   select+show in center if it's a macro/leaf), expands its ancestors so it's
+   actually visible, clears any active search, and scrolls to it. Shared by
+   search-result clicks and AI Scan match clicks so both behave identically. */
+function openNodeInTree(id) {
+  const f = findNode(id);
+  if (!f) return;
+  f.path.forEach(p => sessionExpanded.add(p.id));
+  const hasChildren = !!(f.node.children && f.node.children.length);
+  if (hasChildren && f.node.type === "title") sessionExpanded.add(f.node.id);
+  kbdFocusId = id;
+  state.activeId = id;
+  const searchBox = document.getElementById("search");
+  if (searchBox) searchBox.value = "";
+  pendingScrollToId = id;
+  render();
 }
 
 function renderTree() {
@@ -506,19 +553,41 @@ function nodeMatches(n, q) {
 }
 
 /* ============================================================
-   SMART SEARCH — flat results with folder path + highlighted snippet
+   SMART SEARCH — flat results with folder path + highlighted snippet.
+   Also matches across languages: if you're viewing Arabic and search in
+   English (or vice versa), a node whose OTHER-language mirror matches the
+   query is still surfaced, using the mirror's text for the snippet.
    ============================================================ */
-function renderSearchResults(query) {
-  const box = document.createElement("div");
-  box.className = "search-results";
+function computeSearchResults(query) {
   const results = [];
+  const otherLang = state.lang === "ar" ? "en" : "ar";
   const walk = (nodes, path) => nodes.forEach(n => {
     const labelHit = n.label.toLowerCase().includes(query);
     const textHit = !!(n.text && n.text.toLowerCase().includes(query));
-    if (labelHit || textHit) results.push({ node: n, path, labelHit, textHit });
+    let mirrorHit = null;
+    if (!labelHit && !textHit) {
+      const mirrorId = getMirrorId(n.id);
+      if (mirrorId) {
+        const mf = findNodeInLang(mirrorId, otherLang);
+        if (mf) {
+          const m = mf.node;
+          const mLabelHit = m.label.toLowerCase().includes(query);
+          const mTextHit = !!(m.text && m.text.toLowerCase().includes(query));
+          if (mLabelHit || mTextHit) mirrorHit = { node: m, labelHit: mLabelHit, textHit: mTextHit };
+        }
+      }
+    }
+    if (labelHit || textHit || mirrorHit) results.push({ node: n, path, labelHit, textHit, mirrorHit });
     walk(n.children || [], [...path, n.label]);
   });
   walk(currentTree(), []);
+  return results;
+}
+
+function renderSearchResults(query) {
+  const box = document.createElement("div");
+  box.className = "search-results";
+  const results = computeSearchResults(query);
 
   if (!results.length) {
     box.innerHTML = `<div class="no-results">No matches for "${escapeHtml(query)}".</div>`;
@@ -534,20 +603,17 @@ function renderSearchResults(query) {
     let snippetHtml = "";
     if (r.textHit) {
       snippetHtml = `<div class="result-snippet">${highlightSnippet(r.node.text, query)}</div>`;
+    } else if (r.mirrorHit && r.mirrorHit.textHit) {
+      snippetHtml = `<div class="result-snippet">(matched via ${state.lang === "ar" ? "English" : "Arabic"} version) ${highlightSnippet(r.mirrorHit.node.text, query)}</div>`;
+    } else if (r.mirrorHit && r.mirrorHit.labelHit) {
+      snippetHtml = `<div class="result-snippet">(matched via ${state.lang === "ar" ? "English" : "Arabic"} title: "${escapeHtml(r.mirrorHit.node.label)}")</div>`;
     }
     item.innerHTML = `
       <div class="result-path">${escapeHtml(pathStr)}</div>
       <div class="result-label">${dot}${icon} ${escapeHtml(r.node.label)}</div>
       ${snippetHtml}
     `;
-    item.addEventListener("click", () => {
-      // Ensure ancestors are expanded so the node is visible once search clears
-      let cur = findNode(r.node.id);
-      if (cur) cur.path.forEach(p => sessionExpanded.add(p.id));
-      state.activeId = r.node.id;
-      document.getElementById("search").value = "";
-      render();
-    });
+    item.addEventListener("click", () => openNodeInTree(r.node.id));
     box.appendChild(item);
   });
   return box;
@@ -584,7 +650,8 @@ function renderNode(node, depth) {
   const isExpanded = !hasChildren || !isTitle || sessionExpanded.has(node.id);
 
   const row = document.createElement("div");
-  row.className = "node-row" + (state.activeId === node.id ? " active" : "");
+  row.className = "node-row" + (state.activeId === node.id ? " active" : "") + (kbdFocusId === node.id ? " kbd-focus" : "");
+  row.dataset.id = node.id;
   const isFav = state.favorites.includes(node.id);
   const icon = node.type === "title" ? "📁" : "📝";
   const caret = hasChildren ? (isExpanded ? "▾" : "▸") : "";
@@ -612,9 +679,11 @@ function renderNode(node, depth) {
     if (act === "color") { e.stopPropagation(); openColorPopover(e.target, node.id); return; }
     if (act === "del") { e.stopPropagation(); if (confirm(`Delete "${node.label}"?`)) { removeNode(node.id); render(); } return; }
     if (hasChildren && isTitle && e.target.closest(".label, .caret, .icon")) {
+      kbdFocusId = node.id;
       toggleFolderExpanded(node.id);
       return;
     }
+    kbdFocusId = node.id;
     state.activeId = node.id;
     render();
   });
@@ -972,16 +1041,6 @@ function openSettings() {
     return { label: f ? f.node.label : "(deleted)", count: c };
   }).sort((a,b) => b.count - a.count);
 
-  const allMacros = [];
-  ["en", "ar"].forEach(lang => {
-    const walk = (nodes) => nodes.forEach(n => {
-      if (n.type === "macro") allMacros.push({ id: n.id, label: n.label, lang });
-      walk(n.children || []);
-    });
-    walk(state.trees[lang]);
-  });
-  const underused = allMacros.filter(m => !state.usage[m.id]).slice(0, 10);
-
   const modal = document.createElement("div");
   modal.className = "modal-backdrop";
   modal.innerHTML = `
@@ -1029,22 +1088,21 @@ function openSettings() {
       <div class="card">
         <h4>📚 Policy Database</h4>
         <p style="color:var(--muted); font-size:12px; margin:0 0 8px">
-          Raw ingested policy text that grounds every AI feature. Delete anything outdated or wrong here.
+          Raw ingested policy text that grounds every AI feature. Open one to view or edit it, or delete anything outdated or wrong.
         </p>
         ${state.policies.length ? state.policies.map(p => `
           <div class="stat-row">
-            <span>${escapeHtml(p.title)} <span style="color:var(--muted); font-size:11px">(${(p.text||'').length} chars)</span></span>
-            <button class="btn sm danger" onclick="if(confirm('Delete policy &quot;${escapeHtml(p.title).replace(/"/g,'&quot;')}&quot;?')) deletePolicy('${p.id}')">Delete</button>
+            <span style="cursor:pointer" onclick="openPolicyEditor('${p.id}')">${escapeHtml(p.title)} <span style="color:var(--muted); font-size:11px">(${(p.text||'').length} chars)</span></span>
+            <span style="display:flex; gap:4px">
+              <button class="btn sm" onclick="openPolicyEditor('${p.id}')">Open</button>
+              <button class="btn sm danger" onclick="if(confirm('Delete policy &quot;${escapeHtml(p.title).replace(/"/g,'&quot;')}&quot;?')) deletePolicy('${p.id}')">Delete</button>
+            </span>
           </div>
         `).join('') : '<p style="color:var(--muted); font-size:12px">No policies ingested yet — use 🧠 Ingest Policy.</p>'}
       </div>
       <div class="card">
         <h4>📈 Velocity — Most Used</h4>
         ${usageEntries.slice(0,10).map(e => `<div class="stat-row"><span>${escapeHtml(e.label)}</span><span class="count">${e.count}×</span></div>`).join('') || '<p style="color:var(--muted); font-size:12px">No usage data yet.</p>'}
-      </div>
-      <div class="card">
-        <h4>💤 Underutilized</h4>
-        ${underused.map(m => `<div class="stat-row"><span>${escapeHtml(m.label)}</span><span class="badge">${m.lang}</span></div>`).join('') || '<p style="color:var(--muted); font-size:12px">All macros are being used!</p>'}
       </div>
       <div class="card">
         <h4>💾 Backup & Restore</h4>
@@ -1124,6 +1182,45 @@ function deletePolicy(id) {
   openSettings();
 }
 
+function openPolicyEditor(id) {
+  const p = state.policies.find(x => x.id === id);
+  if (!p) return;
+  const modal = document.createElement("div");
+  modal.className = "modal-backdrop";
+  modal.innerHTML = `
+    <div class="modal">
+      <h3>📚 Policy: ${escapeHtml(p.title)}</h3>
+      <div class="row">
+        <label>Title</label>
+        <input id="edit-policy-title" type="text" value="${escapeHtml(p.title)}" />
+      </div>
+      <div class="row">
+        <label>Text (ingested ${new Date(p.ingestedAt).toLocaleString()})</label>
+        <textarea id="edit-policy-text" rows="14">${escapeHtml(p.text)}</textarea>
+      </div>
+      <div class="modal-actions">
+        <button class="btn ghost" onclick="closeModal(); openSettings();">Back</button>
+        <button class="btn danger" onclick="if(confirm('Delete this policy?')) deletePolicy('${p.id}')">Delete</button>
+        <button class="btn primary" onclick="savePolicyEdit('${p.id}')">Save Changes</button>
+      </div>
+    </div>
+  `;
+  document.getElementById("modal-root").appendChild(modal);
+}
+
+function savePolicyEdit(id) {
+  const p = state.policies.find(x => x.id === id);
+  if (!p) return;
+  const title = (document.getElementById("edit-policy-title").value || "").trim();
+  const text = document.getElementById("edit-policy-text").value;
+  p.title = title || p.title;
+  p.text = text;
+  save();
+  closeModal();
+  toast("Policy updated");
+  openSettings();
+}
+
 const POLICY_STOPWORDS = new Set(["the","a","an","is","are","was","were","to","of","and","or","in","on","for","with","this","that","it","be","if","we","our","you","your","i","he","she","they","them","his","her","its","from","as","at","by","not","no","do","does","did","has","have","had","will","would","can","could","should","must","اذا","في","من","الى","على","عن","هذا","هذه","و","او","ان","كان"]);
 
 // Cheap, dependency-free "poor man's RAG": scores saved policies by keyword
@@ -1149,6 +1246,41 @@ function policyContextFor(query) {
   const rel = getRelevantPolicies(query, 3);
   if (!rel.length) return "(No specific ingested policy matched this — use sound general customer-service judgment.)";
   return rel.map(p => `[Policy: ${p.title}]\n${p.text}`).join("\n\n");
+}
+
+// Same idea as getRelevantPolicies/policyContextFor but over the actual saved
+// macro library, so drafted replies are built FROM real approved macros
+// (adapted to the specific case) instead of invented from scratch whenever
+// something close enough already exists.
+function relevantMacrosFor(query, max = 4) {
+  const all = flattenMacros();
+  if (!all.length) return [];
+  const terms = (query || "").toLowerCase().split(/[^a-z0-9\u0600-\u06FF]+/i).filter(w => w.length > 2 && !POLICY_STOPWORDS.has(w));
+  if (!terms.length) return [];
+  const scored = all.map(m => {
+    const hay = (m.node.label + " " + m.node.text).toLowerCase();
+    const score = terms.reduce((s, w) => s + (hay.includes(w) ? 1 : 0), 0);
+    return { m, score };
+  }).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
+  return scored.slice(0, max).map(x => x.m);
+}
+
+function macroContextFor(query) {
+  const rel = relevantMacrosFor(query, 4);
+  if (!rel.length) return "(No closely matching saved macro found — draft an original reply consistent with the policy and persona instructions above.)";
+  return rel.map(m => `[Saved macro: ${m.path.join(" › ")} — ${m.node.label}]\n${m.node.text}`).join("\n\n");
+}
+
+// Existing folder/macro titles + policy titles, offered to the AI as reusable
+// categories for contact reason / hashtag generation so real-world tagging
+// stays consistent instead of the AI inventing a fresh label every time.
+function categoryCandidates() {
+  const titles = new Set();
+  const walk = (nodes) => nodes.forEach(n => { titles.add(n.label); walk(n.children || []); });
+  walk(state.trees.en);
+  walk(state.trees.ar);
+  state.policies.forEach(p => titles.add(p.title));
+  return Array.from(titles).slice(0, 80);
 }
 
 function savePolicyOnly() {
@@ -1202,19 +1334,65 @@ function normalizeTree(nodes) {
   }));
 }
 
+// Batches every label/text in a tree into as few AI calls as possible instead
+// of one call per string — this is the single biggest lever for staying under
+// any rate limit during policy ingestion (previously ~2 calls per node, fired
+// sequentially; a 9-node tree meant ~18 rapid-fire calls).
 async function deepTranslateTree(nodes, targetLang) {
-  const out = [];
-  for (const n of nodes) {
-    out.push({
+  const strings = [];
+  const collect = (list) => list.forEach(n => {
+    strings.push(n.label);
+    strings.push(n.type === "macro" ? (n.text || "") : "");
+    collect(n.children || []);
+  });
+  collect(nodes);
+
+  const translated = (strings.length && aiReady()) ? await batchTranslate(strings, targetLang) : strings;
+
+  let i = 0;
+  const rebuild = (list) => list.map(n => {
+    const label = translated[i] || n.label; i++;
+    const text = translated[i] || ""; i++;
+    return {
       id: uid(),
       type: n.type,
-      label: (await translateText(n.label, targetLang)) || n.label,
-      text: n.text ? ((await translateText(n.text, targetLang)) || n.text) : "",
+      label,
+      text: n.type === "macro" ? text : "",
       color: n.color || null,
-      children: await deepTranslateTree(n.children || [], targetLang)
-    });
+      children: rebuild(n.children || [])
+    };
+  });
+  return rebuild(nodes);
+}
+
+// Translates a flat array of strings in as few calls as possible. Chunks at 40
+// strings/call so very large policies don't risk one oversized prompt/response;
+// typical ingestions (a handful of folders/macros) finish in a single call.
+async function batchTranslate(strings, targetLang) {
+  if (!strings.length) return strings.slice();
+  const CHUNK = 40;
+  const out = [];
+  for (let i = 0; i < strings.length; i += CHUNK) {
+    out.push(...(await batchTranslateChunk(strings.slice(i, i + CHUNK), targetLang)));
   }
   return out;
+}
+
+async function batchTranslateChunk(strings, targetLang) {
+  const instruction = targetLang === "ar"
+    ? "Translate each string in this JSON array into natural, professional Modern Standard Arabic, the way a well-trained bilingual customer service agent would actually write it — not a stiff literal machine translation, not casual slang."
+    : "Translate each string in this JSON array into natural, professional English customer-service writing.";
+  const prompt = `${instruction} Preserve any [bracket placeholders] EXACTLY as-is, untranslated. Empty strings stay empty strings. Return STRICT JSON only: an array of translated strings, same length and order as the input, no markdown fences, no commentary.\n\nInput array:\n${JSON.stringify(strings)}`;
+  const out = await aiGenerate(prompt);
+  if (!out) return strings.slice();
+  try {
+    const parsed = JSON.parse(out.replace(/```json|```/g, "").trim());
+    if (Array.isArray(parsed) && parsed.length === strings.length) return parsed;
+    console.error("Batch translate: length mismatch", parsed, strings);
+  } catch (e) {
+    console.error("Batch translate: bad JSON", e, out);
+  }
+  return strings.slice(); // fall back to untranslated rather than failing the whole ingestion
 }
 
 function linkMirrors(en, ar) {
@@ -1229,7 +1407,19 @@ function linkMirrors(en, ar) {
    Reused by AI Scan draft reply, the AI Assistant chat, and contact-packet
    generation, so tone and badge-awareness stay consistent everywhere.
    ============================================================ */
-const PERSONA_INSTRUCTIONS = `You are a professional customer service representative for a food delivery platform. Tone: warm and human, never robotic or generic — friendly by default, and firm (while staying respectful) when policy requires holding a line. When writing in Arabic, use natural, professional Modern Standard Arabic the way a well-trained bilingual support agent actually writes it — not a stiff literal translation, not overly classical/formal, and not casual slang. Match whichever language the customer used. Company policy (given below, if any) is the highest-priority source of truth; if nothing relevant was found, use sound customer-service judgment instead of inventing a policy.`;
+const PERSONA_INSTRUCTIONS = `You are helping Mohammad, a customer service agent at Deliveroo, write live chat replies to customers. Tone: warm and human, never robotic or generic — friendly by default, and firm (while staying respectful) when policy requires holding a line. When writing in Arabic, use natural, professional Modern Standard Arabic the way a well-trained bilingual support agent actually writes it — not a stiff literal translation, not overly classical/formal, and not casual slang. Match whichever language the customer used. Company policy (given below, if any) is the highest-priority source of truth; if nothing relevant was found, use sound customer-service judgment instead of inventing a policy.
+
+This is a LIVE CHAT message, not an email. Never write a subject line, never open with "Dear [Name]," and never close with an email sign-off like "Best regards" or a signature block. Keep it short and conversational, the way a real chat reply reads. When it's natural for a line to reference who's replying or where from (e.g. a greeting or wrap-up), you can mention "Mohammad" and/or "Deliveroo" — but don't force it into every message.
+
+Never use an em dash or en dash (— or –) anywhere in the text; it reads as AI-generated. Use a period, comma, or "and" instead. Avoid other AI writing tells too: don't over-hedge, don't use stock phrases like "I understand your frustration" as a reflex opener, and don't pad the message with unnecessary filler. Write the way a genuinely good human agent would actually type it.`;
+
+// Safety-net cleanup applied to every AI response: strips dash characters the
+// model might still slip in despite the instruction above, since a prompt
+// instruction alone isn't 100% reliable.
+function sanitizeAiText(text) {
+  if (!text) return text;
+  return text.replace(/\s*[—–]\s*/g, ", ").replace(/,\s*,+/g, ",").replace(/,\s*\./g, ".").replace(/,\s*\n/g, "\n");
+}
 
 function badgeNoteFor(badge) {
   return {
@@ -1276,8 +1466,7 @@ async function aiDraftReply() {
   if (!msg) return;
   if (!aiReady()) { aiNotReadyToast(); return; }
   box.innerHTML = '<p style="color:var(--muted); font-size:12px">Drafting...</p>';
-  const macros = flattenMacros().map(m => `${m.node.label}: ${m.node.text}`).join('\n');
-  const prompt = `${PERSONA_INSTRUCTIONS}\n\n${badgeNoteFor(currentBadge)}\n\nRelevant policy:\n${policyContextFor(msg)}\n\nExisting macro tone reference (for style only, don't just copy one verbatim):\n${macros}\n\nCustomer message: "${msg}"\n\nWrite ONE best reply in the same language as the customer message. Use [brackets] for placeholders. Return only the reply text, no commentary.`;
+  const prompt = `${PERSONA_INSTRUCTIONS}\n\n${badgeNoteFor(currentBadge)}\n\nRelevant policy:\n${policyContextFor(msg)}\n\nRelevant saved macros (when one genuinely fits, adapt/polish it for this specific message rather than writing something unrelated from scratch; only draft fully original when nothing here fits):\n${macroContextFor(msg)}\n\nCustomer message: "${msg}"\n\nWrite ONE best reply in the same language as the customer message. Use [brackets] for placeholders. Return only the reply text, no commentary.`;
   const reply = await aiGenerate(prompt);
   if (!reply) {
     // aiGenerate/aiChat already toasted the specific error — don't render a
@@ -1294,6 +1483,7 @@ async function aiDraftReply() {
         <button class="btn sm" onclick="navigator.clipboard.writeText(${JSON.stringify(reply)}); toast('Copied')">📋 Copy</button>
         <button class="btn sm primary" onclick='saveAiReplyToMacros(${JSON.stringify(reply)})'>+ Add to Macros</button>
       </div>
+      ${toneButtonsHtml(reply, null)}
     </div>
   `;
 }
@@ -1313,10 +1503,11 @@ function flattenMacros(lang = state.lang) {
 }
 
 function suggestionHtml(m) {
-  return `<div class="suggestion" onclick="state.activeId='${m.node.id}'; render();" style="cursor:pointer">
-    <div class="path">${escapeHtml(m.path.join(' › '))}</div>
-    <b>${escapeHtml(m.node.label)}</b>
-    <div style="color:var(--muted); font-size:12px; margin-top:4px">${escapeHtml((m.node.text || '').slice(0, 120))}${(m.node.text||'').length>120?'...':''}</div>
+  return `<div class="suggestion">
+    <div class="path" style="cursor:pointer" onclick="openNodeInTree('${m.node.id}')">${escapeHtml(m.path.join(' › '))}</div>
+    <b style="cursor:pointer" onclick="openNodeInTree('${m.node.id}')">${escapeHtml(m.node.label)}</b>
+    <div style="color:var(--muted); font-size:12px; margin-top:4px; cursor:pointer" onclick="openNodeInTree('${m.node.id}')">${escapeHtml((m.node.text || '').slice(0, 120))}${(m.node.text||'').length>120?'...':''}</div>
+    ${toneButtonsHtml(m.node.text || '', m.node.id)}
   </div>`;
 }
 
@@ -1342,6 +1533,9 @@ ${badgeNoteFor(currentBadge)}
 
 Relevant ingested company policy (highest-priority source of truth when it applies):
 ${policyContextFor(queryForRelevance)}
+
+Relevant saved macros (when one of these genuinely fits, base your reply on it and adapt/polish it for the specific situation rather than writing something unrelated from scratch — this keeps replies consistent with what's already approved. Only draft something fully original when nothing here fits):
+${macroContextFor(queryForRelevance)}
 
 You're chatting with the support agent (not the customer) inside their internal macro tool. They may paste a customer's message and ask for a reply, ask a general question, or ask you to help reason through a case. If you're missing a detail you'd need to give a confident, correct answer (e.g. "did the customer confirm the item was missing, or just late?"), ask ONE short clarifying question instead of guessing. When you do give a reply meant to be sent to the customer, write it entirely in the customer's language, make it copy-paste ready, and don't wrap it in commentary or labels.`;
 }
@@ -1386,7 +1580,7 @@ function renderAssistantChat() {
   log.innerHTML = assistantHistory.map(m => `
     <div class="chat-msg ${m.role}">
       <div class="chat-bubble">${escapeHtml(m.content)}</div>
-      ${m.role === "assistant" ? `<button class="btn sm ghost" onclick="navigator.clipboard.writeText(${JSON.stringify(m.content)}); toast('Copied')">📋 Copy</button>` : ""}
+      ${m.role === "assistant" ? `<button class="btn sm ghost" onclick="navigator.clipboard.writeText(${JSON.stringify(m.content)}); toast('Copied')">📋 Copy</button>${toneButtonsHtml(m.content, null)}` : ""}
     </div>
   `).join("") || `<p style="color:var(--muted); font-size:12px">No messages yet — ask anything or paste a customer message above.</p>`;
   log.scrollTop = log.scrollHeight;
@@ -1417,6 +1611,9 @@ async function generateContactPacket() {
   const transcript = assistantHistory.map(m => `${m.role === "user" ? "Agent" : "Assistant"}: ${m.content}`).join("\n");
   const sys = buildAssistantSystemPrompt(transcript);
   const prompt = `${sys}
+
+Existing categories already used internally (folder/macro titles and policy names) — prefer reusing one of these verbatim for contactReason and/or hashtag when it genuinely fits the case, since consistent tagging matters for reporting. Only invent a new short one when nothing here fits, so Mohammad can tell it's a fresh suggestion he should double-check:
+${categoryCandidates().join(", ") || "(none saved yet)"}
 
 Based on the conversation below, produce STRICT JSON only (no markdown fences, no prose) with exactly this shape:
 {"contactReason":"short 2-6 word phrase, e.g. 'Order marked delivered, not received'","log":"2-4 sentence professional internal log: what happened and how it was resolved, written the way a real support log should read since the customer can request it","hashtag":"#OneWordOrCamelCaseClassificationTag"}
@@ -1449,28 +1646,90 @@ ${transcript}`;
 /* ============================================================
    TONE REWRITE
    ============================================================ */
-async function rewriteTone(tone) {
-  if (!aiReady()) { aiNotReadyToast(); return; }
-  const editor = document.getElementById("macro-editor");
-  const text = serializeEditor(editor);
-  toast(`Rewriting as ${tone}...`);
-  const prompt = `Rewrite this customer service message with a ${tone} tone. Preserve [bracket placeholders] exactly. Keep the same language — if it's Arabic, use natural professional Modern Standard Arabic, not a stiff literal rewrite. Return only rewritten text:\n\n${text}`;
-  const out = await aiGenerate(prompt);
-  if (out) {
-    navigator.clipboard.writeText(out);
-    toast(`${tone} version copied`);
-  }
+/* ============================================================
+   TONE REWRITE & INTENT DRAFTING — unified, non-destructive.
+   These never silently overwrite a macro. They always show the result in a
+   preview with explicit choices: Copy, Add as Sub-Macro (new node, doesn't
+   touch the original), or Replace Original (only offered when there IS an
+   original macro to replace — not for AI Assistant chat replies).
+   ============================================================ */
+function toneButtonsHtml(text, sourceNodeId) {
+  const t = JSON.stringify(text || "");
+  const sid = JSON.stringify(sourceNodeId || null);
+  return `
+    <div class="tone-btn-row">
+      <button class="tone-btn" onclick='event.stopPropagation(); rewriteToneFor(${t}, "empathetic", ${sid})'>💗 Empathetic</button>
+      <button class="tone-btn" onclick='event.stopPropagation(); rewriteToneFor(${t}, "professional", ${sid})'>💼 Professional</button>
+      <button class="tone-btn" onclick='event.stopPropagation(); rewriteToneFor(${t}, "friendly", ${sid})'>😊 Friendly</button>
+      <button class="btn sm" onclick='event.stopPropagation(); aiRewriteFromIntentFor(${sid})'>✨ AI Draft from Intent</button>
+    </div>`;
 }
 
-async function aiRewriteFromIntent() {
+async function rewriteToneFor(text, tone, sourceNodeId) {
+  if (!aiReady()) { aiNotReadyToast(); return; }
+  toast(`Rewriting as ${tone}...`);
+  const prompt = `${PERSONA_INSTRUCTIONS}\n\nRewrite this customer service message with a more ${tone} tone, keeping it faithful to policy. Preserve [bracket placeholders] exactly. Keep the same language. Return only the rewritten message, no commentary:\n\n${text}`;
+  const out = await aiGenerate(prompt);
+  if (out) presentAiRewriteResult(`${tone.charAt(0).toUpperCase()}${tone.slice(1)} Version`, out.trim(), sourceNodeId);
+}
+
+async function aiRewriteFromIntentFor(sourceNodeId) {
   const intent = prompt("Describe the intent (e.g. 'push back about cancellation policy'):");
   if (!intent) return;
   if (!aiReady()) { aiNotReadyToast(); return; }
-  const draft = await aiGenerate(`Write a professional customer service macro in ${state.lang === 'ar' ? 'Arabic' : 'English'} for: ${intent}. Use [brackets] for placeholders. If Arabic, use natural professional Modern Standard Arabic, not a literal translation.\n\nRelevant policy:\n${policyContextFor(intent)}`);
-  if (draft) {
-    const f = findNode(state.activeId);
-    if (f) { f.node.text = draft.trim(); render(); }
-  }
+  const prompt = `${PERSONA_INSTRUCTIONS}\n\nWrite a customer service reply for this intent: ${intent}\n\nRelevant policy:\n${policyContextFor(intent)}\n\nRelevant saved macros (adapt one if it fits, otherwise write fresh but stay consistent with their tone/policy):\n${macroContextFor(intent)}\n\nUse [brackets] for placeholders. Return only the reply, no commentary.`;
+  const draft = await aiGenerate(prompt);
+  if (draft) presentAiRewriteResult(`AI Draft: ${intent.slice(0, 40)}`, draft.trim(), sourceNodeId);
+}
+
+// Backward-compatible names used by the macro-view toolbar buttons.
+async function rewriteTone(tone) {
+  const editor = document.getElementById("macro-editor");
+  if (!editor) return;
+  await rewriteToneFor(serializeEditor(editor), tone, state.activeId);
+}
+async function aiRewriteFromIntent() {
+  await aiRewriteFromIntentFor(state.activeId);
+}
+
+function presentAiRewriteResult(title, text, sourceNodeId) {
+  const hasSource = !!sourceNodeId && !!findNode(sourceNodeId);
+  const modal = document.createElement("div");
+  modal.className = "modal-backdrop";
+  modal.innerHTML = `
+    <div class="modal">
+      <h3>✨ ${escapeHtml(title)}</h3>
+      <div class="macro-editor" style="white-space:pre-wrap; margin-bottom:14px">${escapeHtml(text)}</div>
+      <p style="color:var(--muted); font-size:11px; margin:-6px 0 12px">This won't change anything until you choose an action below.</p>
+      <div class="modal-actions" style="justify-content:flex-start; flex-wrap:wrap">
+        <button class="btn" onclick='navigator.clipboard.writeText(${JSON.stringify(text)}); toast("Copied")'>📋 Copy</button>
+        <button class="btn" onclick='addAiResultAsSubMacro(${JSON.stringify(title)}, ${JSON.stringify(text)}, ${JSON.stringify(sourceNodeId || null)})'>🌱 Add as ${hasSource ? "Sub-Macro" : "New Macro"}</button>
+        ${hasSource ? `<button class="btn primary" onclick='replaceMacroText(${JSON.stringify(sourceNodeId)}, ${JSON.stringify(text)})'>✅ Replace Original</button>` : ""}
+        <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      </div>
+    </div>
+  `;
+  document.getElementById("modal-root").appendChild(modal);
+}
+
+function replaceMacroText(nodeId, text) {
+  const f = findNode(nodeId);
+  if (f) { f.node.text = text; save(); render(); }
+  closeModal();
+  toast("Original replaced");
+}
+
+function addAiResultAsSubMacro(title, text, parentId) {
+  const newNode = { id: uid(), type: "macro", label: (title || "AI Macro").slice(0, 60), text, color: null, children: [] };
+  const f = parentId ? findNode(parentId) : null;
+  if (f) f.node.children.push(newNode);
+  else currentTree().push(newNode);
+  save();
+  state.activeId = newNode.id;
+  pendingScrollToId = newNode.id;
+  render();
+  closeModal();
+  toast("Macro added");
 }
 
 /* ============================================================
@@ -1534,8 +1793,15 @@ async function loadLocalModel() {
   const statusEl = document.getElementById("local-model-status");
   const progEl = document.getElementById("local-model-progress");
   if (!navigator.gpu) {
-    if (statusEl) statusEl.textContent = "Not supported.";
-    toast("This browser/device doesn't support WebGPU, so the local model can't run. Try the latest Chrome or Edge on a desktop.");
+    if (statusEl) statusEl.textContent = "Not supported — this browser has no WebGPU.";
+    toast("This browser doesn't support WebGPU at all, so the local model can't run. Try the latest Chrome or Edge on a desktop.");
+    return;
+  }
+  if (statusEl) statusEl.textContent = "Checking for a compatible GPU...";
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) {
+    if (statusEl) statusEl.textContent = "Not supported on this device — no compatible GPU found.";
+    toast("No compatible GPU found on this device. Local AI can't run here regardless of model choice — this is a hardware limitation, not something fixable in the page. Use the Gemini backend on this machine instead.");
     return;
   }
   if (statusEl) statusEl.textContent = "Loading — first load downloads the model (can take a while)...";
@@ -1575,7 +1841,8 @@ async function aiGenerate(prompt) {
 
 // Unified entry point: messages = [{role: "system"|"user"|"assistant", content}]
 async function aiChat(messages) {
-  return queueAiCall(() => state.aiBackend === "local" ? aiChatLocal(messages) : aiChatGemini(messages));
+  const out = await queueAiCall(() => state.aiBackend === "local" ? aiChatLocal(messages) : aiChatGemini(messages));
+  return out ? sanitizeAiText(out) : out;
 }
 
 let lastGeminiCallAt = 0;
@@ -1735,6 +2002,76 @@ function restoreJSON(event) {
   reader.onerror = () => toast("Restore failed: could not read file");
   reader.readAsText(file);
 }
+
+/* ============================================================
+   KEYBOARD NAVIGATION
+   Up/Down moves a focus cursor through whatever's currently visible (the
+   tree, respecting collapsed folders — or the flat search-results list when
+   searching). Landing on a macro auto-opens it in the center panel; landing
+   on a folder just highlights it, and Enter expands/collapses it (or opens
+   it, for a childless title) the same way a click would.
+   ============================================================ */
+function getVisibleNodeList() {
+  const query = document.getElementById("search").value.trim().toLowerCase();
+  if (query) return computeSearchResults(query).map(r => r.node);
+  const list = [];
+  const walk = (nodes) => nodes.forEach(n => {
+    list.push(n);
+    const hasChildren = !!(n.children && n.children.length);
+    const isTitle = n.type === "title";
+    const isExpanded = !hasChildren || !isTitle || sessionExpanded.has(n.id);
+    if (hasChildren && isExpanded) walk(n.children);
+  });
+  walk(currentTree());
+  return list;
+}
+
+function moveKeyboardFocus(direction) {
+  const list = getVisibleNodeList();
+  if (!list.length) return;
+  let idx = list.findIndex(n => n.id === kbdFocusId);
+  if (idx === -1) idx = list.findIndex(n => n.id === state.activeId);
+  if (idx === -1) idx = direction > 0 ? -1 : list.length;
+  idx = Math.max(0, Math.min(list.length - 1, idx + direction));
+  const node = list[idx];
+  kbdFocusId = node.id;
+  if (node.type === "macro") {
+    // Macros auto-open in the center panel as you scroll to them
+    state.activeId = node.id;
+  }
+  pendingScrollToId = node.id;
+  render();
+}
+
+function activateKeyboardFocus() {
+  if (!kbdFocusId) return;
+  const f = findNode(kbdFocusId);
+  if (!f) return;
+  const hasChildren = !!(f.node.children && f.node.children.length);
+  if (hasChildren && f.node.type === "title") {
+    toggleFolderExpanded(kbdFocusId);
+  } else {
+    state.activeId = kbdFocusId;
+    pendingScrollToId = kbdFocusId;
+    render();
+  }
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Enter") return;
+  // Never hijack real text editing (macro editor, textareas, other inputs),
+  // and stay out of the way entirely while any modal is open.
+  if (document.querySelector(".modal-backdrop")) return;
+  const ae = document.activeElement;
+  const tag = ae && ae.tagName;
+  const isSearchBox = ae && ae.id === "search";
+  const isTextish = ae && (tag === "TEXTAREA" || ae.isContentEditable || (tag === "INPUT" && !isSearchBox));
+  if (isTextish) return;
+
+  if (e.key === "ArrowDown") { e.preventDefault(); moveKeyboardFocus(1); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); moveKeyboardFocus(-1); }
+  else if (e.key === "Enter") { e.preventDefault(); activateKeyboardFocus(); }
+});
 
 /* ============================================================
    EVENTS
