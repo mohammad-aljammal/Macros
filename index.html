@@ -346,10 +346,22 @@ const API_KEY_STORAGE = "mohammad-macro-playbook-gemini-key";
 let GEMINI_API_KEY = localStorage.getItem(API_KEY_STORAGE) || "";
 const OPENROUTER_KEY_STORAGE = "mohammad-macro-playbook-openrouter-key";
 let OPENROUTER_API_KEY = localStorage.getItem(OPENROUTER_KEY_STORAGE) || "";
+// Not persisted — just reflects the most recent call, so Settings can show
+// "what model actually answered last time" since openrouter/free varies.
+let lastOpenRouterModelUsed = null;
 // Priority order OpenRouter tries automatically if one is rate-limited or down.
 // Editable in Settings — exact free model IDs on OpenRouter rotate over time,
 // so check openrouter.ai/models (filter: free) if this list ever 404s.
-const DEFAULT_OPENROUTER_MODELS = "google/gemini-2.5-flash, meta-llama/llama-3.3-70b-instruct:free, qwen/qwen-2.5-7b-instruct:free";
+// The old default's first entry (google/gemini-2.5-flash) had no ":free" suffix,
+// meaning it was the PAID version — it failed instantly with zero OpenRouter
+// credit. Kept here only so loadState() can detect and repair that old default.
+const OLD_DEFAULT_OPENROUTER_MODELS = "google/gemini-2.5-flash, meta-llama/llama-3.3-70b-instruct:free, qwen/qwen-2.5-7b-instruct:free";
+// "openrouter/free" is OpenRouter's own auto-router: it picks a live free model
+// for you, so this default keeps working even as the free-model roster rotates
+// (which it does often). The two explicit :free models behind it are backups
+// in case the auto-router itself has an issue. Every entry here is free — none
+// require OpenRouter credit to use.
+const DEFAULT_OPENROUTER_MODELS = "openrouter/free, meta-llama/llama-3.3-70b-instruct:free, qwen/qwen-2.5-7b-instruct:free";
 const COLOR_PALETTE = ["#f07178", "#ffcb6b", "#7ee2b8", "#6ea8fe", "#c792ea", "#89ddff", "#ff8a65", "#9aa3b2"];
 
 // --- Local WebLLM engine state (not persisted — reloaded fresh each session) ---
@@ -395,6 +407,10 @@ function loadState() {
       if (!parsed.aiBackend) parsed.aiBackend = "gemini";
       if (!parsed.localModelSize) parsed.localModelSize = "1.5b";
       if (!parsed.openRouterModels) parsed.openRouterModels = DEFAULT_OPENROUTER_MODELS;
+      // One-time repair: upgrade anyone still on the old broken default (which
+      // led with a paid model) to the corrected all-free default. Only touches
+      // it if untouched — anything you've customized yourself is left alone.
+      else if (parsed.openRouterModels === OLD_DEFAULT_OPENROUTER_MODELS) parsed.openRouterModels = DEFAULT_OPENROUTER_MODELS;
       return parsed;
     }
   } catch (e) {}
@@ -1085,6 +1101,7 @@ function openSettings() {
             <label style="font-size:12px; color:var(--muted); display:block; margin-bottom:4px">Fallback order (comma-separated model IDs — tried in order; check <a href="https://openrouter.ai/models" target="_blank" rel="noopener" style="color:var(--accent)">openrouter.ai/models</a> for current IDs):</label>
             <textarea id="openrouter-models-input" rows="2" style="width:100%">${escapeHtml(state.openRouterModels || DEFAULT_OPENROUTER_MODELS)}</textarea>
             <button class="btn sm" style="margin-top:6px" onclick="saveOpenRouterModels()">Save List</button>
+            <div id="openrouter-last-model" style="font-size:11px; color:var(--muted); margin-top:6px">${lastOpenRouterModelUsed ? "Last answered by: " + escapeHtml(lastOpenRouterModelUsed) : "Last answered by: (no calls made yet this session)"}</div>
           </div>
         </div>
         <div id="local-model-controls" style="${state.aiBackend==='local'?'':'display:none'}; margin-top:8px; padding-top:8px; border-top:1px dashed var(--border)">
@@ -2068,6 +2085,13 @@ async function aiChatOpenRouter(messages) {
     console.error("OpenRouter empty response", data);
     return null;
   }
+  // OpenRouter reports which model actually answered (relevant since
+  // "openrouter/free" picks a different live model per call) — surface it
+  // so "what model will it use" has a real, checkable answer, not just guesswork.
+  lastOpenRouterModelUsed = data?.model || null;
+  console.log("OpenRouter answered with:", lastOpenRouterModelUsed);
+  const statusEl = document.getElementById("openrouter-last-model");
+  if (statusEl && lastOpenRouterModelUsed) statusEl.textContent = "Last answered by: " + lastOpenRouterModelUsed;
   return text;
 }
 
