@@ -344,6 +344,12 @@ const STORAGE_KEY = "mohammad-macro-playbook-v2";
 //    sharing or syncing a backup file never leaks the key either.
 const API_KEY_STORAGE = "mohammad-macro-playbook-gemini-key";
 let GEMINI_API_KEY = localStorage.getItem(API_KEY_STORAGE) || "";
+const OPENROUTER_KEY_STORAGE = "mohammad-macro-playbook-openrouter-key";
+let OPENROUTER_API_KEY = localStorage.getItem(OPENROUTER_KEY_STORAGE) || "";
+// Priority order OpenRouter tries automatically if one is rate-limited or down.
+// Editable in Settings — exact free model IDs on OpenRouter rotate over time,
+// so check openrouter.ai/models (filter: free) if this list ever 404s.
+const DEFAULT_OPENROUTER_MODELS = "google/gemini-2.5-flash, meta-llama/llama-3.3-70b-instruct:free, qwen/qwen-2.5-7b-instruct:free";
 const COLOR_PALETTE = ["#f07178", "#ffcb6b", "#7ee2b8", "#6ea8fe", "#c792ea", "#89ddff", "#ff8a65", "#9aa3b2"];
 
 // --- Local WebLLM engine state (not persisted — reloaded fresh each session) ---
@@ -388,6 +394,7 @@ function loadState() {
       if (!parsed.policies) parsed.policies = [];
       if (!parsed.aiBackend) parsed.aiBackend = "gemini";
       if (!parsed.localModelSize) parsed.localModelSize = "1.5b";
+      if (!parsed.openRouterModels) parsed.openRouterModels = DEFAULT_OPENROUTER_MODELS;
       return parsed;
     }
   } catch (e) {}
@@ -409,9 +416,12 @@ function defaultState() {
     // Which AI backend powers all AI features. "gemini" = cloud (needs a key +
     // internet). "local" = WebLLM running fully in this browser via WebGPU (needs
     // no key, works offline, but needs the model downloaded once and capable
-    // hardware — see Settings → AI Backend).
+    // hardware — see Settings → AI Backend). "openrouter" = cloud gateway that
+    // automatically retries the next model in openRouterModels if one is
+    // rate-limited or down.
     aiBackend: "gemini",
     localModelSize: "1.5b",
+    openRouterModels: DEFAULT_OPENROUTER_MODELS,
     favorites: [],
     usage: {},
     // Folder ids the user has explicitly pinned open; they stay expanded across reloads.
@@ -1050,11 +1060,32 @@ function openSettings() {
         <h4>🧠 AI Backend</h4>
         <p style="color:var(--muted); font-size:12px; margin:0 0 8px">
           Choose what powers Draft Reply, tone rewrites, AI Scan, the AI Assistant, and policy ingestion.
-          Both options can be switched any time; your Gemini key below stays saved either way.
+          All options can be switched any time; keys below stay saved either way.
         </p>
         <div class="backend-choice">
-          <label><input type="radio" name="ai-backend" value="gemini" ${state.aiBackend!=='local'?'checked':''} onchange="setAiBackend('gemini')"> ☁️ Google Gemini — cloud, needs a key and internet, generally best quality/speed</label>
+          <label><input type="radio" name="ai-backend" value="gemini" ${state.aiBackend==='gemini'?'checked':''} onchange="setAiBackend('gemini')"> ☁️ Google Gemini — cloud, needs a key and internet, generally best quality/speed</label>
+          <label><input type="radio" name="ai-backend" value="openrouter" ${state.aiBackend==='openrouter'?'checked':''} onchange="setAiBackend('openrouter')"> 🔀 OpenRouter — cloud gateway that automatically retries the next model in your list if one is rate-limited or down</label>
           <label><input type="radio" name="ai-backend" value="local" ${state.aiBackend==='local'?'checked':''} onchange="setAiBackend('local')"> 💻 Local AI (WebLLM) — runs fully in this browser, no key needed, works offline; needs a one-time model download and a capable GPU (see notes below)</label>
+        </div>
+        <div id="openrouter-controls" style="${state.aiBackend==='openrouter'?'':'display:none'}; margin-top:8px; padding-top:8px; border-top:1px dashed var(--border)">
+          <p style="color:var(--muted); font-size:12px; margin:0 0 8px">
+            Get a key at <a href="https://openrouter.ai/keys" target="_blank" rel="noopener" style="color:var(--accent)">openrouter.ai/keys</a>.
+            Free tier is 50 requests/day; a one-time non-expiring $10 credit raises that to 1,000/day.
+          </p>
+          <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap">
+            <input id="openrouter-key-input" type="password" placeholder="Paste your OpenRouter API key" value="${OPENROUTER_API_KEY ? escapeHtml(OPENROUTER_API_KEY) : ''}" style="flex:1; min-width:200px" autocomplete="off" />
+            <button class="btn sm ghost" type="button" onclick="const i=document.getElementById('openrouter-key-input'); i.type = i.type==='password' ? 'text' : 'password';">👁</button>
+          </div>
+          <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; align-items:center">
+            <button class="btn primary" onclick="saveOpenRouterKey()">Save Key</button>
+            <button class="btn danger" onclick="clearOpenRouterKey()">Clear Key</button>
+            <span style="font-size:12px; color:${OPENROUTER_API_KEY ? 'var(--accent-2)' : 'var(--muted)'}">${OPENROUTER_API_KEY ? '✓ Key set' : 'No key set'}</span>
+          </div>
+          <div style="margin-top:10px">
+            <label style="font-size:12px; color:var(--muted); display:block; margin-bottom:4px">Fallback order (comma-separated model IDs — tried in order; check <a href="https://openrouter.ai/models" target="_blank" rel="noopener" style="color:var(--accent)">openrouter.ai/models</a> for current IDs):</label>
+            <textarea id="openrouter-models-input" rows="2" style="width:100%">${escapeHtml(state.openRouterModels || DEFAULT_OPENROUTER_MODELS)}</textarea>
+            <button class="btn sm" style="margin-top:6px" onclick="saveOpenRouterModels()">Save List</button>
+          </div>
         </div>
         <div id="local-model-controls" style="${state.aiBackend==='local'?'':'display:none'}; margin-top:8px; padding-top:8px; border-top:1px dashed var(--border)">
           <label><input type="radio" name="local-size" value="1.5b" ${state.localModelSize!=='7b'?'checked':''} onchange="setLocalModelSize('1.5b')"> Fast — Qwen2.5-1.5B (~1.9GB download, broad GPU compatibility, runs on most laptops incl. integrated graphics)</label><br>
@@ -1738,13 +1769,17 @@ function addAiResultAsSubMacro(title, text, parentId) {
    which backend is active; this section is the only place that knows.
    ============================================================ */
 function hasApiKey() { return !!GEMINI_API_KEY; }
+function hasOpenRouterKey() { return !!OPENROUTER_API_KEY; }
 
 // True if the CURRENTLY SELECTED backend is actually usable right now.
 function aiReady() {
-  return state.aiBackend === "local" ? !!localEngine : hasApiKey();
+  if (state.aiBackend === "local") return !!localEngine;
+  if (state.aiBackend === "openrouter") return hasOpenRouterKey();
+  return hasApiKey();
 }
 function aiNotReadyToast() {
   if (state.aiBackend === "local") toast("Local AI model not loaded. Go to ⚙️ Settings → AI Backend and click Load Model.");
+  else if (state.aiBackend === "openrouter") toast("Add an OpenRouter key in ⚙️ Settings first.");
   else toast("Add a Gemini key in ⚙️ Settings first.");
 }
 
@@ -1766,11 +1801,38 @@ function clearGeminiKey() {
   openSettings();
 }
 
+function saveOpenRouterKey() {
+  const val = (document.getElementById("openrouter-key-input").value || "").trim();
+  if (!val) { toast("Enter a key first, or use Clear Key to remove it"); return; }
+  OPENROUTER_API_KEY = val;
+  localStorage.setItem(OPENROUTER_KEY_STORAGE, val);
+  toast("OpenRouter key saved to this browser");
+  closeModal();
+  openSettings();
+}
+
+function clearOpenRouterKey() {
+  OPENROUTER_API_KEY = "";
+  localStorage.removeItem(OPENROUTER_KEY_STORAGE);
+  toast("OpenRouter key cleared");
+  closeModal();
+  openSettings();
+}
+
+function saveOpenRouterModels() {
+  const val = (document.getElementById("openrouter-models-input").value || "").trim();
+  state.openRouterModels = val || DEFAULT_OPENROUTER_MODELS;
+  save();
+  toast("Fallback model list saved");
+}
+
 function setAiBackend(v) {
   state.aiBackend = v;
   save();
   const ctrl = document.getElementById("local-model-controls");
   if (ctrl) ctrl.style.display = v === "local" ? "" : "none";
+  const orCtrl = document.getElementById("openrouter-controls");
+  if (orCtrl) orCtrl.style.display = v === "openrouter" ? "" : "none";
 }
 
 function setLocalModelSize(v) {
@@ -1841,7 +1903,10 @@ async function aiGenerate(prompt) {
 
 // Unified entry point: messages = [{role: "system"|"user"|"assistant", content}]
 async function aiChat(messages) {
-  const out = await queueAiCall(() => state.aiBackend === "local" ? aiChatLocal(messages) : aiChatGemini(messages));
+  const backendFn = state.aiBackend === "local" ? aiChatLocal
+    : state.aiBackend === "openrouter" ? aiChatOpenRouter
+    : aiChatGemini;
+  const out = await queueAiCall(() => backendFn(messages));
   return out ? sanitizeAiText(out) : out;
 }
 
@@ -1952,6 +2017,58 @@ async function aiChatLocal(messages) {
     toast("Local AI error: " + msg);
     return null;
   }
+}
+
+async function aiChatOpenRouter(messages) {
+  if (!OPENROUTER_API_KEY) {
+    toast("AI error: no OpenRouter key set. Add one in ⚙️ Settings → AI Backend.");
+    return null;
+  }
+  const modelsList = (state.openRouterModels || DEFAULT_OPENROUTER_MODELS)
+    .split(",").map(s => s.trim()).filter(Boolean);
+  if (!modelsList.length) {
+    toast("AI error: no OpenRouter fallback models configured. Add at least one in ⚙️ Settings.");
+    return null;
+  }
+  let res;
+  try {
+    // OpenRouter tries modelsList[0] first, then automatically retries the next
+    // entry if that one is rate-limited or down — this is the "auto-switch"
+    // behavior, handled server-side rather than by retry code here.
+    res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + OPENROUTER_API_KEY
+      },
+      body: JSON.stringify({ models: modelsList, messages })
+    });
+  } catch (e) {
+    console.error(e);
+    toast("AI network error: " + (e.message || e) + ". Check your internet connection.");
+    return null;
+  }
+  let data;
+  try { data = await res.json(); } catch (e) {
+    toast("AI error: invalid response from OpenRouter (HTTP " + res.status + ").");
+    return null;
+  }
+  if (!res.ok || data.error) {
+    const msg = data?.error?.message || ("HTTP " + res.status);
+    console.error("OpenRouter API error", data);
+    if (res.status === 401) toast("AI error: invalid OpenRouter key. Check it in ⚙️ Settings.");
+    else if (res.status === 402) toast("AI error: OpenRouter credits exhausted. Add credits at openrouter.ai.");
+    else if (res.status === 429) toast("AI error: all models in your fallback list are rate-limited right now. Try again shortly, or add more models to the list in ⚙️ Settings.");
+    else toast("AI error: " + msg);
+    return null;
+  }
+  const text = data?.choices?.[0]?.message?.content || "";
+  if (!text) {
+    toast("AI error: empty response from OpenRouter.");
+    console.error("OpenRouter empty response", data);
+    return null;
+  }
+  return text;
 }
 
 async function translateText(text, targetLang) {

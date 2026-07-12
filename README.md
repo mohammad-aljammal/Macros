@@ -38,27 +38,37 @@ them.
 ## AI features
 
 AI drafting, tone rewriting, translation, macro matching, policy ingestion,
-and the AI Assistant chat can run on **either** of two backends, switchable
+and the AI Assistant chat can run on **any of three** backends, switchable
 any time in **⚙️ Settings → AI Backend**:
 
 - **☁️ Google Gemini** (cloud) — needs an API key (Settings → AI (Gemini) Key)
   and internet, generally the fastest/highest-quality option.
+- **🔀 OpenRouter** (cloud) — a gateway in front of 300+ models across many
+  providers. Give it a priority list of models and it automatically retries
+  the next one if the current one is rate-limited or down — useful as either
+  your primary backend or a safety net for when Gemini hits its limit.
+  Free tier is 50 requests/day (20/min); a one-time, non-expiring $10 credit
+  raises that to 1,000/day. Get a key at
+  [openrouter.ai/keys](https://openrouter.ai/keys), and edit the fallback
+  model list in Settings (exact free model IDs rotate — check
+  [openrouter.ai/models](https://openrouter.ai/models) if the default list
+  ever stops working).
 - **💻 Local AI (WebLLM)** — runs the Qwen2.5 model entirely inside your
   browser via WebGPU. No key, no internet needed once loaded, nothing ever
   leaves your machine. Two sizes:
-  - **1.5B ("Fast")** — ~1.5GB download, runs on most laptops including
-    integrated graphics. Lower quality ceiling than Gemini or the 7B model.
-  - **7B ("Quality")** — ~5GB download, needs a dedicated GPU with roughly
+  - **1.5B ("Fast")** — ~1.9GB download, runs on most laptops including
+    integrated graphics. Lower quality ceiling than Gemini/OpenRouter or the 7B model.
+  - **7B ("Quality")** — ~5.9GB download, needs a dedicated GPU with roughly
     6GB+ VRAM. Most office desktops (integrated graphics only) will struggle
     or fail to load this — check your actual hardware before relying on it.
 
 Get a Gemini key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
-The key is stored only in this browser's `localStorage` — never written into
+All keys are stored only in this browser's `localStorage` — never written into
 `index.html`, never committed to this repo, never included in **Backup JSON**
 exports. If you ever hardcode a key into a copy of this file and push it to
 a public GitHub repo, assume it gets auto-detected and revoked within
 minutes — GitHub's secret scanning partner program actively watches for
-exactly that. Keep using the Settings field instead.
+exactly that. Keep using the Settings fields instead.
 
 ### Policy Database
 
