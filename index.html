@@ -1846,7 +1846,7 @@ async function aiChat(messages) {
 }
 
 let lastGeminiCallAt = 0;
-const GEMINI_MIN_GAP_MS = 4500; // keeps well under Gemini free-tier's ~10-15 requests/minute ceiling
+const GEMINI_MIN_GAP_MS = 6500; // gemini-3.5-flash free tier is 10 RPM specifically — 4500ms (13.3 RPM) was still over that; this keeps ~9.2 RPM with margin
 
 async function aiChatGemini(messages) {
   if (!GEMINI_API_KEY) {
@@ -1891,7 +1891,13 @@ async function aiChatGemini(messages) {
     if (res.status === 400 && /API key/i.test(msg)) toast("AI error: invalid API key. Check it in ⚙️ Settings.");
     else if (res.status === 403) toast("AI error: access denied — key lacks permission for " + GEMINI_MODEL + " (" + msg + ")");
     else if (res.status === 404) toast("AI error: model '" + GEMINI_MODEL + "' not found. Update GEMINI_MODEL.");
-    else if (res.status === 429) toast("AI error: rate limit / quota exceeded. Waiting a bit longer between requests — try again in a moment.");
+    else if (res.status === 429) {
+      let dim = "rate limit";
+      if (/PerDay/i.test(msg)) dim = "daily request limit (RPD) — resets at midnight Pacific time";
+      else if (/TokensPerMinute|InputTokens|OutputTokens/i.test(msg)) dim = "tokens-per-minute limit (TPM) — this call's context was too large";
+      else if (/PerMinute|Requests/i.test(msg)) dim = "requests-per-minute limit (RPM) — too many calls too fast";
+      toast("AI error: hit the " + dim + ". " + (dim.includes("RPD") ? "Try again after the reset, or upgrade to a paid tier." : "Try again shortly.") + " (raw: " + msg + ")");
+    }
     else toast("AI error" + status + ": " + msg);
     return null;
   }
