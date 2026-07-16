@@ -35,6 +35,26 @@ browser's `localStorage`, scoped to whatever URL you're viewing the app from.
 won't share data — use **Settings → Backup JSON** to export/import between
 them.
 
+## Sections: Customer / Rider / Partner / Calls
+
+The tabs below the top bar switch between four fully separate work sections.
+Each has its own macro tree (folders/macros never mix between sections) and
+its own tagged policies. Every AI feature checks the active section's own
+policies and macros first, and only falls back to another section (or a
+policy explicitly tagged "General" when ingesting) if nothing relevant is
+found in the current one — so Customer-specific rules never leak into Rider
+or Partner answers unless nothing else fits.
+
+**Calls** is tuned differently on purpose: since you're live on the phone,
+the AI writes short, natural, sayable-out-loud lines instead of written chat
+replies — no brackets left unfilled, no bullet points, and any required
+action (like issuing a refund) is called out separately from the words to
+actually say.
+
+Switching sections clears the currently open macro (each section's tree is
+independent) but keeps your language choice — English/Arabic applies across
+all four sections.
+
 ## AI features
 
 AI drafting, tone rewriting, translation, macro matching, policy ingestion,
@@ -82,19 +102,35 @@ has sub-cases) and mirrors it into Arabic.
 
 ### Customer Badges (internal only)
 
-The AI Assistant has an internal-only customer classification toggle —
-⚪ Grey (default, most customers), 🔴 Red (flagged for abuse/bad-faith history),
-⭐ Gold (valuable, low-complaint). It resets to Grey every session. This is
-never shown or hinted to the customer; it only steers how firmly vs.
-generously the AI applies policy internally.
+Internal-only customer classification: ⚪ Grey (default, most customers),
+🔴 Red (flagged for abuse/bad-faith history), ⭐ Gold (valuable, low-complaint),
+⭐⭐ Gold (top-tier, high-value). Never shown or hinted to the customer — it
+only steers how firmly vs. generously the AI applies policy internally. If a
+matched policy gives different guidance by badge and you haven't specified
+one, the AI is instructed to ask rather than silently assume Grey.
+
+There are two independent badge selectors:
+- **AI Scan / Draft Reply** (side panel) uses one global badge at a time.
+- **AI Assistant** uses a badge **per open chat**, since you might be
+  juggling different customers with different classifications at once.
 
 ### AI Assistant
 
-**🤖 AI Assistant** in the top bar opens an interactive chat: ask anything,
-paste a customer message for a ready-to-send reply, or work through a case —
-it will ask a clarifying question first if it's missing something it needs.
-**Generate Contact Reason / Log / Hashtag** turns the current chat into three
-copyable fields for your case documentation.
+**🤖 AI Assistant** in the top bar opens a chat grounded in the active
+section's policies and macros first. Ask it anything — general questions,
+"what contact reason should I use?", "which hashtag fits this?" — and it
+answers with the specific value directly when policy supports it, or gives a
+clearly-flagged general answer when nothing matches. Paste a customer
+message for a ready-to-send reply, or paste an entire past chat and ask
+questions about it.
+
+You can have **multiple chats open at once** (tabs at the top of the
+window) — useful for juggling several customers in parallel. Each chat is
+independent (its own history and badge) and closable with the ✕ on its tab.
+Chats are scoped to the section they were opened in and persist across
+reloads. **Generate Contact Reason / Log / Hashtag** turns the active chat
+into three copyable fields, preferring existing folder/macro/policy names
+over inventing new ones.
 
 ## Backup & restore
 

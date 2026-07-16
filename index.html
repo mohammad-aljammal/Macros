@@ -58,6 +58,19 @@
     padding: 6px 14px; border-radius: 999px; font-size: 12px; font-weight: 600;
   }
   .lang-toggle button.active { background: var(--accent); color: #0f1115; }
+
+  .party-tabs {
+    display: flex; gap: 6px; padding: 8px 16px; background: var(--panel);
+    border-bottom: 1px solid var(--border); position: sticky; top: 49px; z-index: 9;
+  }
+  .party-tab {
+    background: var(--panel-2); color: var(--muted); border: 1px solid var(--border);
+    padding: 6px 14px; border-radius: 8px; font-size: 13px; font-weight: 600;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .party-tab:hover { color: var(--text); }
+  .party-tab.active { background: rgba(110,168,254,0.15); border-color: var(--accent); color: var(--text); }
+  .party-tab .count { font-size: 10.5px; color: var(--muted); font-weight: 400; }
   .search { flex: 0 1 300px; }
 
   /* Layout */
@@ -227,6 +240,17 @@
   }
   .cust-badge-btn.active { border-color: var(--accent); color: var(--text); background: rgba(110,168,254,0.15); }
 
+  /* AI Assistant multi-chat tabs */
+  .assistant-tabs { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 4px; }
+  .assistant-tab {
+    display: flex; align-items: center; gap: 6px; background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 999px; padding: 5px 8px 5px 12px;
+    font-size: 12px; cursor: pointer;
+  }
+  .assistant-tab.active { border-color: var(--accent); background: rgba(110,168,254,0.15); color: var(--text); }
+  .assistant-tab .close-x { color: var(--muted); padding: 0 4px; border-radius: 50%; }
+  .assistant-tab .close-x:hover { color: var(--danger); background: rgba(240,113,120,0.15); }
+
   /* AI Assistant chat */
   .assistant-log {
     height: 320px; overflow-y: auto; background: var(--panel-2); border: 1px solid var(--border);
@@ -286,6 +310,8 @@
   <button class="btn" onclick="openSettings()">⚙️ Settings</button>
 </div>
 
+<div class="party-tabs" id="party-tabs"></div>
+
 <div class="layout">
   <div class="col tree">
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
@@ -305,6 +331,7 @@
   <div class="col side">
     <div class="card">
       <h4>🤖 AI Scan — Match Customer Message</h4>
+      <div class="cust-badge-row" id="global-badge-row" style="margin-bottom:6px"></div>
       <textarea id="ai-scan-input" rows="4" style="width:100%" placeholder="Paste customer message here..."></textarea>
       <div class="toolbar">
         <button class="btn primary" onclick="aiScanMatches()">Find Best Match</button>
@@ -362,6 +389,15 @@ const OLD_DEFAULT_OPENROUTER_MODELS = "google/gemini-2.5-flash, meta-llama/llama
 // in case the auto-router itself has an issue. Every entry here is free — none
 // require OpenRouter credit to use.
 const DEFAULT_OPENROUTER_MODELS = "openrouter/free, meta-llama/llama-3.3-70b-instruct:free, qwen/qwen-2.5-7b-instruct:free";
+
+// The four separate work sections. Each has its own fully separate macro tree
+// (EN + AR) and its own tagged policies — switching sections is a full context
+// switch, not a filter on one shared tree.
+const PARTIES = ["customer", "rider", "partner", "calls"];
+function partyLabel(party) { return { customer: "Customer", rider: "Rider", partner: "Partner", calls: "Calls" }[party] || party; }
+function partyIcon(party) { return { customer: "🧑", rider: "🛵", partner: "🏬", calls: "📞" }[party] || "📁"; }
+// Who Mohammad is actually addressing in each section — used to phrase AI prompts correctly.
+function partyAudienceNoun(party) { return { customer: "customer", rider: "delivery rider", partner: "restaurant partner", calls: "customer" }[party] || "customer"; }
 const COLOR_PALETTE = ["#f07178", "#ffcb6b", "#7ee2b8", "#6ea8fe", "#c792ea", "#89ddff", "#ff8a65", "#9aa3b2"];
 
 // --- Local WebLLM engine state (not persisted — reloaded fresh each session) ---
@@ -411,6 +447,26 @@ function loadState() {
       // led with a paid model) to the corrected all-free default. Only touches
       // it if untouched — anything you've customized yourself is left alone.
       else if (parsed.openRouterModels === OLD_DEFAULT_OPENROUTER_MODELS) parsed.openRouterModels = DEFAULT_OPENROUTER_MODELS;
+
+      // Migrate old single-section shape (state.trees.en/ar as flat arrays,
+      // state.mirror as a flat id map) into the new party-separated shape.
+      // Existing work goes under "customer" so nothing is lost; the other
+      // three sections start empty.
+      if (parsed.trees && Array.isArray(parsed.trees.en)) {
+        parsed.trees = {
+          customer: { en: parsed.trees.en, ar: parsed.trees.ar || [] },
+          rider: { en: [], ar: [] },
+          partner: { en: [], ar: [] },
+          calls: { en: [], ar: [] }
+        };
+        parsed.mirror = { customer: parsed.mirror || {}, rider: {}, partner: {}, calls: {} };
+      }
+      if (!parsed.activeParty || !PARTIES.includes(parsed.activeParty)) parsed.activeParty = "customer";
+      // Old policies had no section tag — "general" means "checked from every
+      // section" rather than assuming they only belonged to one.
+      parsed.policies.forEach(p => { if (!p.party) p.party = "general"; });
+      if (!parsed.assistantChats) parsed.assistantChats = [];
+      if (typeof parsed.activeAssistantChatId === "undefined") parsed.activeAssistantChatId = null;
       return parsed;
     }
   } catch (e) {}
@@ -423,11 +479,15 @@ function defaultState() {
   const arGreetId = uid();
   return {
     lang: "en",
+    activeParty: "customer",
     activeId: null,
     policy: "",
     // Permanent database of raw ingested policy texts, used to ground every AI
     // feature (chat, drafting, contact-reason/log/hashtag generation). Separate
-    // from the generated macro tree — this is the source text itself.
+    // from the generated macro tree — this is the source text itself. Each
+    // entry is tagged with a `party` ("customer"/"rider"/"partner"/"calls", or
+    // "general" for cross-section policies) so retrieval checks the active
+    // section's own policies first and only falls back to the others.
     policies: [],
     // Which AI backend powers all AI features. "gemini" = cloud (needs a key +
     // internet). "local" = WebLLM running fully in this browser via WebGPU (needs
@@ -444,22 +504,37 @@ function defaultState() {
     // Everything else initializes collapsed on each page load (session-only expand state
     // is tracked separately in `sessionExpanded`, not persisted).
     pinnedFolders: [],
+    // Each of the 4 sections gets its own fully separate EN/AR tree — Customer
+    // macros are never mixed with Rider/Partner/Calls macros.
     trees: {
-      en: [
-        { id: uid(), type: "title", label: "Greetings", color: null, children: [
-          { id: enGreetId, type: "macro", label: "Welcome message", color: null, text: "Hi [Customer Name], thank you for reaching out! How can I help you today?", children: [] }
-        ]},
-        { id: uid(), type: "title", label: "Refunds", color: null, children: [] }
-      ],
-      ar: [
-        { id: uid(), type: "title", label: "التحيات", color: null, children: [
-          { id: arGreetId, type: "macro", label: "رسالة ترحيب", color: null, text: "مرحباً [اسم العميل]، شكراً لتواصلك معنا! كيف يمكنني مساعدتك اليوم؟", children: [] }
-        ]},
-        { id: uid(), type: "title", label: "المبالغ المستردة", color: null, children: [] }
-      ]
+      customer: {
+        en: [
+          { id: uid(), type: "title", label: "Greetings", color: null, children: [
+            { id: enGreetId, type: "macro", label: "Welcome message", color: null, text: "Hi [Customer Name], thank you for reaching out! How can I help you today?", children: [] }
+          ]},
+          { id: uid(), type: "title", label: "Refunds", color: null, children: [] }
+        ],
+        ar: [
+          { id: uid(), type: "title", label: "التحيات", color: null, children: [
+            { id: arGreetId, type: "macro", label: "رسالة ترحيب", color: null, text: "مرحباً [اسم العميل]، شكراً لتواصلك معنا! كيف يمكنني مساعدتك اليوم؟", children: [] }
+          ]},
+          { id: uid(), type: "title", label: "المبالغ المستردة", color: null, children: [] }
+        ]
+      },
+      rider: { en: [], ar: [] },
+      partner: { en: [], ar: [] },
+      calls: { en: [], ar: [] }
     },
-    // Map English node id -> Arabic mirror node id (for sync)
-    mirror: { [enGreetId]: arGreetId }
+    // Map English node id -> Arabic mirror node id (for sync), one map per section.
+    mirror: {
+      customer: { [enGreetId]: arGreetId },
+      rider: {}, partner: {}, calls: {}
+    },
+    // AI Assistant: multiple independent, closable chat sessions (e.g. one per
+    // customer you're juggling at once). Persisted so a page refresh mid-shift
+    // doesn't lose an in-progress case.
+    assistantChats: [],
+    activeAssistantChatId: null
   };
 }
 
@@ -469,7 +544,7 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 /* ============================================================
    TREE HELPERS
    ============================================================ */
-function currentTree() { return state.trees[state.lang]; }
+function currentTree() { return state.trees[state.activeParty][state.lang]; }
 
 function findNode(id, tree = currentTree(), parent = null, path = []) {
   for (const n of tree) {
@@ -480,8 +555,8 @@ function findNode(id, tree = currentTree(), parent = null, path = []) {
   return null;
 }
 
-function findNodeInLang(id, lang) {
-  return findNode(id, state.trees[lang]);
+function findNodeInLang(id, lang, party = state.activeParty) {
+  return findNode(id, state.trees[party][lang]);
 }
 
 function removeNode(id) {
@@ -500,15 +575,27 @@ function removeNode(id) {
   if (state.activeId === id) state.activeId = null;
 }
 
-function getMirrorId(id) {
-  if (state.mirror[id]) return state.mirror[id];
-  for (const [k, v] of Object.entries(state.mirror)) if (v === id) return k;
+function getMirrorId(id, party = state.activeParty) {
+  const m = state.mirror[party];
+  if (m[id]) return m[id];
+  for (const [k, v] of Object.entries(m)) if (v === id) return k;
   return null;
 }
-function setMirror(enId, arId) { state.mirror[enId] = arId; }
-function deleteMirror(id) {
-  delete state.mirror[id];
-  for (const [k, v] of Object.entries(state.mirror)) if (v === id) delete state.mirror[k];
+function setMirror(enId, arId, party = state.activeParty) { state.mirror[party][enId] = arId; }
+function deleteMirror(id, party = state.activeParty) {
+  const m = state.mirror[party];
+  delete m[id];
+  for (const [k, v] of Object.entries(m)) if (v === id) delete m[k];
+}
+
+function switchParty(party) {
+  if (!PARTIES.includes(party) || party === state.activeParty) return;
+  state.activeParty = party;
+  state.activeId = null;
+  kbdFocusId = null;
+  document.getElementById("search").value = "";
+  save();
+  render();
 }
 
 /* ============================================================
@@ -519,15 +606,26 @@ function render() {
   document.querySelectorAll("#lang-toggle button").forEach(b => {
     b.classList.toggle("active", b.dataset.lang === state.lang);
   });
+  renderPartyTabs();
   renderTree();
   renderCenter();
   renderFavorites();
+  renderGlobalBadgeRow();
   save();
   if (pendingScrollToId) {
     const id = pendingScrollToId;
     pendingScrollToId = null;
     scrollNodeIntoView(id);
   }
+}
+
+function renderPartyTabs() {
+  const el = document.getElementById("party-tabs");
+  if (!el) return;
+  el.innerHTML = PARTIES.map(p => {
+    const macroCount = flattenMacros(state.lang, p).length;
+    return `<button class="party-tab${p === state.activeParty ? " active" : ""}" onclick="switchParty('${p}')">${partyIcon(p)} ${partyLabel(p)} <span class="count">${macroCount}</span></button>`;
+  }).join("");
 }
 
 /* Scrolls a tree row into view and gives it a brief highlight flash so it's
@@ -1042,9 +1140,9 @@ async function submitNodeModal(parentId) {
     if (mirrorParentId) {
       const mp = findNodeInLang(mirrorParentId, otherLang);
       if (mp) mp.node.children.push(mirrorNode);
-      else state.trees[otherLang].push(mirrorNode);
+      else state.trees[state.activeParty][otherLang].push(mirrorNode);
     } else {
-      state.trees[otherLang].push(mirrorNode);
+      state.trees[state.activeParty][otherLang].push(mirrorNode);
     }
     const enId = state.lang === "en" ? newNode.id : mirrorNode.id;
     const arId = state.lang === "en" ? mirrorNode.id : newNode.id;
@@ -1063,7 +1161,11 @@ function closeModal() { document.getElementById("modal-root").innerHTML = ""; }
    ============================================================ */
 function openSettings() {
   const usageEntries = Object.entries(state.usage).map(([id, c]) => {
-    const f = findNode(id) || findNodeInLang(id, "en") || findNodeInLang(id, "ar");
+    let f = null;
+    for (const p of PARTIES) {
+      f = findNodeInLang(id, "en", p) || findNodeInLang(id, "ar", p);
+      if (f) break;
+    }
     return { label: f ? f.node.label : "(deleted)", count: c };
   }).sort((a,b) => b.count - a.count);
 
@@ -1140,7 +1242,7 @@ function openSettings() {
         </p>
         ${state.policies.length ? state.policies.map(p => `
           <div class="stat-row">
-            <span style="cursor:pointer" onclick="openPolicyEditor('${p.id}')">${escapeHtml(p.title)} <span style="color:var(--muted); font-size:11px">(${(p.text||'').length} chars)</span></span>
+            <span style="cursor:pointer" onclick="openPolicyEditor('${p.id}')">${p.party === 'general' ? '🌐' : partyIcon(p.party)} ${escapeHtml(p.title)} <span style="color:var(--muted); font-size:11px">(${p.party === 'general' ? 'General' : partyLabel(p.party)}, ${(p.text||'').length} chars)</span></span>
             <span style="display:flex; gap:4px">
               <button class="btn sm" onclick="openPolicyEditor('${p.id}')">Open</button>
               <button class="btn sm danger" onclick="if(confirm('Delete policy &quot;${escapeHtml(p.title).replace(/"/g,'&quot;')}&quot;?')) deletePolicy('${p.id}')">Delete</button>
@@ -1189,6 +1291,13 @@ function openPolicyModal() {
         and mirrors it into Arabic.
       </p>
       <div class="row">
+        <label>Section this policy belongs to</label>
+        <select id="policy-party">
+          ${PARTIES.map(p => `<option value="${p}" ${p === state.activeParty ? "selected" : ""}>${partyIcon(p)} ${partyLabel(p)}</option>`).join("")}
+          <option value="general">🌐 General (checked from every section)</option>
+        </select>
+      </div>
+      <div class="row">
         <label>Policy Title (optional, helps you find it later)</label>
         <input id="policy-title" type="text" placeholder="e.g. Late Delivery Policy" />
       </div>
@@ -1199,7 +1308,7 @@ function openPolicyModal() {
       <div class="modal-actions">
         <button class="btn ghost" onclick="closeModal()">Cancel</button>
         <button class="btn" onclick="savePolicyOnly()">Save Policy Only</button>
-        <button class="btn primary" onclick="ingestPolicy()">Save & Generate Tree</button>
+        <button class="btn primary" onclick="ingestPolicy()">Save & Generate Tree (into ${partyLabel(state.activeParty)})</button>
       </div>
       <p style="color:var(--muted); font-size:11px; margin-top:10px">
         ${state.policies.length} polic${state.policies.length === 1 ? 'y' : 'ies'} saved so far.
@@ -1213,11 +1322,14 @@ function openPolicyModal() {
 // Adds (or keeps growing) the permanent policy database used to ground AI
 // features. This is deliberately separate from the generated macro tree —
 // it's the raw source text the AI reasons from, not the polished replies.
-function addPolicyRecord(title, text) {
+// Tagged with whichever section was active when it was ingested; retrieval
+// checks that section's own policies first, then falls back to the rest.
+function addPolicyRecord(title, text, party = state.activeParty) {
   state.policies.push({
     id: uid(),
     title: (title || "").trim() || ("Policy " + (state.policies.length + 1)),
     text,
+    party,
     ingestedAt: new Date().toISOString()
   });
   save();
@@ -1238,6 +1350,13 @@ function openPolicyEditor(id) {
   modal.innerHTML = `
     <div class="modal">
       <h3>📚 Policy: ${escapeHtml(p.title)}</h3>
+      <div class="row">
+        <label>Section</label>
+        <select id="edit-policy-party">
+          ${PARTIES.map(pt => `<option value="${pt}" ${p.party === pt ? "selected" : ""}>${partyIcon(pt)} ${partyLabel(pt)}</option>`).join("")}
+          <option value="general" ${p.party === "general" ? "selected" : ""}>🌐 General (checked from every section)</option>
+        </select>
+      </div>
       <div class="row">
         <label>Title</label>
         <input id="edit-policy-title" type="text" value="${escapeHtml(p.title)}" />
@@ -1261,8 +1380,10 @@ function savePolicyEdit(id) {
   if (!p) return;
   const title = (document.getElementById("edit-policy-title").value || "").trim();
   const text = document.getElementById("edit-policy-text").value;
+  const party = document.getElementById("edit-policy-party").value;
   p.title = title || p.title;
   p.text = text;
+  p.party = party;
   save();
   closeModal();
   toast("Policy updated");
@@ -1272,79 +1393,99 @@ function savePolicyEdit(id) {
 const POLICY_STOPWORDS = new Set(["the","a","an","is","are","was","were","to","of","and","or","in","on","for","with","this","that","it","be","if","we","our","you","your","i","he","she","they","them","his","her","its","from","as","at","by","not","no","do","does","did","has","have","had","will","would","can","could","should","must","اذا","في","من","الى","على","عن","هذا","هذه","و","او","ان","كان"]);
 
 // Cheap, dependency-free "poor man's RAG": scores saved policies by keyword
-// overlap with the query and returns the most relevant few. Returns [] when
-// nothing meaningfully matches, so callers fall back to general judgment
-// instead of stuffing in irrelevant policy text.
-function getRelevantPolicies(query, max = 3) {
+// overlap with the query and returns the most relevant few. Checks the active
+// section's own policies (plus "general" cross-section ones) first; only
+// falls back to searching every other section if nothing scores there, per
+// "use any policy if it can't find something relevant in this section."
+function getRelevantPolicies(query, max = 3, party = state.activeParty) {
   if (!state.policies.length) return [];
   const terms = (query || "").toLowerCase().split(/[^a-z0-9\u0600-\u06FF]+/i).filter(w => w.length > 2 && !POLICY_STOPWORDS.has(w));
   if (!terms.length) return [];
-  const scored = state.policies.map(p => {
+  const scoreOf = (p) => {
     const hay = (p.title + " " + p.text).toLowerCase();
-    const score = terms.reduce((s, w) => s + (hay.includes(w) ? 1 : 0), 0);
-    return { p, score };
-  }).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
+    return terms.reduce((s, w) => s + (hay.includes(w) ? 1 : 0), 0);
+  };
+  const ownPool = state.policies.filter(p => p.party === party || p.party === "general");
+  let scored = ownPool.map(p => ({ p, score: scoreOf(p) })).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
+  if (scored.length) return scored.slice(0, max).map(x => x.p);
+  scored = state.policies.map(p => ({ p, score: scoreOf(p) })).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
   return scored.slice(0, max).map(x => x.p);
 }
 
 // Formats the most relevant saved policies (if any) into a text block ready
 // to drop into a prompt. Falls back to explicitly telling the AI nothing
 // matched, so it reasons from general judgment instead of guessing at policy.
-function policyContextFor(query) {
-  const rel = getRelevantPolicies(query, 3);
-  if (!rel.length) return "(No specific ingested policy matched this — use sound general customer-service judgment.)";
-  return rel.map(p => `[Policy: ${p.title}]\n${p.text}`).join("\n\n");
+// Flags any result pulled in from a DIFFERENT section so the AI treats it as
+// secondary, not as this section's own rule.
+function policyContextFor(query, party = state.activeParty) {
+  const rel = getRelevantPolicies(query, 3, party);
+  if (!rel.length) return "(No specific ingested policy matched this in any section — use sound general customer-service judgment, and say plainly that this isn't policy-sourced.)";
+  return rel.map(p => {
+    const scopeNote = p.party === party ? "" : p.party === "general" ? " (general, cross-section policy)" : ` (from the ${partyLabel(p.party)} section — no ${partyLabel(party)}-specific policy was found for this, so use with care and flag it as a secondary source)`;
+    return `[Policy: ${p.title}${scopeNote}]\n${p.text}`;
+  }).join("\n\n");
 }
 
 // Same idea as getRelevantPolicies/policyContextFor but over the actual saved
 // macro library, so drafted replies are built FROM real approved macros
 // (adapted to the specific case) instead of invented from scratch whenever
-// something close enough already exists.
-function relevantMacrosFor(query, max = 4) {
-  const all = flattenMacros();
-  if (!all.length) return [];
+// something close enough already exists. Section-scoped with the same
+// fallback behavior as policies.
+function relevantMacrosFor(query, max = 4, party = state.activeParty) {
   const terms = (query || "").toLowerCase().split(/[^a-z0-9\u0600-\u06FF]+/i).filter(w => w.length > 2 && !POLICY_STOPWORDS.has(w));
   if (!terms.length) return [];
-  const scored = all.map(m => {
+  const scoreOf = (m) => {
     const hay = (m.node.label + " " + m.node.text).toLowerCase();
-    const score = terms.reduce((s, w) => s + (hay.includes(w) ? 1 : 0), 0);
-    return { m, score };
-  }).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
+    return terms.reduce((s, w) => s + (hay.includes(w) ? 1 : 0), 0);
+  };
+  const ownPool = flattenMacros(state.lang, party);
+  let scored = ownPool.map(m => ({ m, score: scoreOf(m) })).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
+  if (scored.length) return scored.slice(0, max).map(x => x.m);
+  const fallbackAll = [];
+  PARTIES.filter(p => p !== party).forEach(p => flattenMacros(state.lang, p).forEach(m => fallbackAll.push({ ...m, _fromParty: p })));
+  scored = fallbackAll.map(m => ({ m, score: scoreOf(m) })).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
   return scored.slice(0, max).map(x => x.m);
 }
 
-function macroContextFor(query) {
-  const rel = relevantMacrosFor(query, 4);
-  if (!rel.length) return "(No closely matching saved macro found — draft an original reply consistent with the policy and persona instructions above.)";
-  return rel.map(m => `[Saved macro: ${m.path.join(" › ")} — ${m.node.label}]\n${m.node.text}`).join("\n\n");
+function macroContextFor(query, party = state.activeParty) {
+  const rel = relevantMacrosFor(query, 4, party);
+  if (!rel.length) return "(No closely matching saved macro found in any section — draft an original reply consistent with the policy and persona instructions above.)";
+  return rel.map(m => {
+    const scopeNote = m._fromParty ? ` (from the ${partyLabel(m._fromParty)} section — use with care)` : "";
+    return `[Saved macro: ${m.path.join(" › ")} — ${m.node.label}${scopeNote}]\n${m.node.text}`;
+  }).join("\n\n");
 }
 
 // Existing folder/macro titles + policy titles, offered to the AI as reusable
 // categories for contact reason / hashtag generation so real-world tagging
 // stays consistent instead of the AI inventing a fresh label every time.
-function categoryCandidates() {
+// Scoped to the active section (Customer/Rider/Partner/Calls have different
+// valid contact reasons), plus any "general" cross-section policies.
+function categoryCandidates(party = state.activeParty) {
   const titles = new Set();
   const walk = (nodes) => nodes.forEach(n => { titles.add(n.label); walk(n.children || []); });
-  walk(state.trees.en);
-  walk(state.trees.ar);
-  state.policies.forEach(p => titles.add(p.title));
+  walk(state.trees[party].en);
+  walk(state.trees[party].ar);
+  state.policies.filter(p => p.party === party || p.party === "general").forEach(p => titles.add(p.title));
   return Array.from(titles).slice(0, 80);
 }
 
 function savePolicyOnly() {
   const text = document.getElementById("policy-text").value;
   const title = document.getElementById("policy-title").value;
+  const party = document.getElementById("policy-party").value;
   state.policy = text;
-  if (text.trim()) addPolicyRecord(title, text.trim());
+  if (text.trim()) addPolicyRecord(title, text.trim(), party);
   save(); closeModal(); toast("Policy saved");
 }
 
 async function ingestPolicy() {
   const text = document.getElementById("policy-text").value.trim();
   const title = document.getElementById("policy-title").value;
+  const policyParty = document.getElementById("policy-party").value;
   if (!text) return;
   state.policy = text;
-  addPolicyRecord(title, text);
+  addPolicyRecord(title, text, policyParty);
   if (!aiReady()) { aiNotReadyToast(); save(); closeModal(); return; }
   toast("AI generating tree...");
   const prompt = `You are a customer service knowledge architect. Parse the following company policy into a LOGICALLY NESTED hierarchy of folders (titles) and macros — do not flatten everything into one level. Group related scenarios under a shared parent title, and add a sub-title when a topic has multiple genuinely distinct sub-cases (e.g. "Late Delivery" branching into "20-45 minutes late" and "45+ minutes late" as separate macros or even separate sub-titles if each has several scenarios of its own). Only go as deep as the content actually warrants — a single flat macro is fine when there's no real sub-case. Return STRICT JSON only, no prose, no markdown fences. Schema:
@@ -1358,10 +1499,10 @@ ${text}`;
     const cleaned = result.replace(/```json|```/g, "").trim();
     const parsed = JSON.parse(cleaned);
     const enNodes = normalizeTree(parsed.tree || []);
-    state.trees.en.push(...enNodes);
+    state.trees[state.activeParty].en.push(...enNodes);
     // Translate to Arabic
     const arNodes = await deepTranslateTree(enNodes, "ar");
-    state.trees.ar.push(...arNodes);
+    state.trees[state.activeParty].ar.push(...arNodes);
     linkMirrors(enNodes, arNodes);
     save(); closeModal(); render(); toast("Policy ingested & translated");
   } catch (e) {
@@ -1455,11 +1596,23 @@ function linkMirrors(en, ar) {
    Reused by AI Scan draft reply, the AI Assistant chat, and contact-packet
    generation, so tone and badge-awareness stay consistent everywhere.
    ============================================================ */
-const PERSONA_INSTRUCTIONS = `You are helping Mohammad, a customer service agent at Deliveroo, write live chat replies to customers. Tone: warm and human, never robotic or generic — friendly by default, and firm (while staying respectful) when policy requires holding a line. When writing in Arabic, use natural, professional Modern Standard Arabic the way a well-trained bilingual support agent actually writes it — not a stiff literal translation, not overly classical/formal, and not casual slang. Match whichever language the customer used. Company policy (given below, if any) is the highest-priority source of truth; if nothing relevant was found, use sound customer-service judgment instead of inventing a policy.
+// Builds persona instructions tailored to the currently active section.
+// Calls gets spoken-not-written framing; Customer/Rider/Partner get the right
+// audience noun so the AI doesn't address a rider or restaurant like a customer.
+function buildPersonaInstructions(party = state.activeParty) {
+  const audience = partyAudienceNoun(party);
+  const base = `You are helping Mohammad, a customer service agent at Deliveroo, currently working the ${partyLabel(party)} section. Tone: warm and human, never robotic or generic — friendly by default, and firm (while staying respectful) when policy requires holding a line. When writing in Arabic, use natural, professional Modern Standard Arabic the way a well-trained bilingual support agent actually writes it — not a stiff literal translation, not overly classical/formal, and not casual slang. Match whichever language the ${audience} used, if known. Company policy (given below, if any) is the highest-priority source of truth; if this section's own policies don't cover it, you may draw on another section's policy as a secondary source, and only fall back to general judgment if nothing fits anywhere — and say plainly when you're doing that rather than presenting a guess as certain.`;
 
-This is a LIVE CHAT message, not an email. Never write a subject line, never open with "Dear [Name]," and never close with an email sign-off like "Best regards" or a signature block. Keep it short and conversational, the way a real chat reply reads. When it's natural for a line to reference who's replying or where from (e.g. a greeting or wrap-up), you can mention "Mohammad" and/or "Deliveroo" — but don't force it into every message.
+  const mediumNote = party === "calls"
+    ? `\n\nMohammad is currently LIVE ON A PHONE CALL with a ${audience} — this is spoken, not written. Give him short, natural sentences he can say out loud immediately: no bullet points, no markdown, no "Dear", no unfilled [bracket] placeholders (ask him for the missing detail instead of leaving a bracket, or phrase it naturally like "your order" if the exact value isn't known yet). If he also needs to take an action (e.g. issue a refund), state that separately and clearly from the words to actually speak.`
+    : `\n\nThis is a LIVE CHAT message, not an email. Never write a subject line, never open with "Dear [Name]," and never close with an email sign-off like "Best regards" or a signature block. Keep it short and conversational, the way a real chat reply reads.`;
 
-Never use an em dash or en dash (— or –) anywhere in the text; it reads as AI-generated. Use a period, comma, or "and" instead. Avoid other AI writing tells too: don't over-hedge, don't use stock phrases like "I understand your frustration" as a reflex opener, and don't pad the message with unnecessary filler. Write the way a genuinely good human agent would actually type it.`;
+  const identityNote = `\n\nWhen it's natural for a line to reference who's replying or where from (e.g. a greeting or wrap-up), you can mention "Mohammad" and/or "Deliveroo" — but don't force it into every message.`;
+
+  const styleNote = `\n\nNever use an em dash or en dash (— or –) anywhere in the text; it reads as AI-generated. Use a period, comma, or "and" instead. Avoid other AI writing tells too: don't over-hedge, don't use stock phrases like "I understand your frustration" as a reflex opener, and don't pad with unnecessary filler. Be exactly as thorough as the situation needs and no more — don't burn length just to sound complete.`;
+
+  return base + mediumNote + identityNote + styleNote;
+}
 
 // Safety-net cleanup applied to every AI response: strips dash characters the
 // model might still slip in despite the instruction above, since a prompt
@@ -1469,12 +1622,34 @@ function sanitizeAiText(text) {
   return text.replace(/\s*[—–]\s*/g, ", ").replace(/,\s*,+/g, ",").replace(/,\s*\./g, ".").replace(/,\s*\n/g, "\n");
 }
 
+// Grey/Red/Gold/Gold-2 customer classification. Internal only — never shown
+// or hinted to the customer. If a matched policy differentiates its guidance
+// by badge and none more specific than the default has been set, the AI is
+// told to ask rather than silently assume — see the "grey" note below.
 function badgeNoteFor(badge) {
   return {
-    grey: "Customer badge (internal only, NEVER mention to the customer): GREY — default/unclassified. Apply standard policy and standard tone.",
+    grey: "Customer badge (internal only, NEVER mention to the customer): GREY — default/unclassified, which is most customers. Apply standard policy and standard tone. IMPORTANT: if the relevant policy above gives different guidance depending on customer classification, and nothing more specific than this default has been stated, ask Mohammad directly which classification applies (grey/red/gold/gold-2) before finalizing badge-dependent advice, rather than assuming grey is correct.",
     red: "Customer badge (internal only, NEVER mention to the customer): RED — flagged internally for a history of abuse or bad-faith complaints. Apply policy strictly and minimally; do not offer discretionary goodwill beyond what policy requires. Stay professional and firm, not cold.",
-    gold: "Customer badge (internal only, NEVER mention to the customer): GOLD — flagged internally as a valuable, low-complaint customer. Lean toward the more generous end of what policy allows, and prioritize retention and warmth."
+    gold: "Customer badge (internal only, NEVER mention to the customer): GOLD ⭐ — flagged internally as a valuable, low-complaint customer. Lean toward the more generous end of what policy allows, and prioritize retention and warmth.",
+    gold2: "Customer badge (internal only, NEVER mention to the customer): GOLD ⭐⭐ — flagged internally as a top-tier, highly valuable customer with an excellent history. Apply the most generous end of what policy allows, prioritize retention strongly, and treat the case as high-priority."
   }[badge] || "";
+}
+function badgeShortLabel(badge) {
+  return { grey: "⚪ Grey", red: "🔴 Red", gold: "⭐ Gold", gold2: "⭐⭐ Gold" }[badge] || badge;
+}
+
+// Badge used by AI Scan / Draft Reply (single global value — that panel isn't
+// per-chat like the AI Assistant, so one active classification at a time).
+function setGlobalBadge(b) {
+  currentBadge = b;
+  renderGlobalBadgeRow();
+}
+function renderGlobalBadgeRow() {
+  const el = document.getElementById("global-badge-row");
+  if (!el) return;
+  el.innerHTML = ["grey", "red", "gold", "gold2"].map(b =>
+    `<button type="button" class="cust-badge-btn${currentBadge === b ? " active" : ""}" onclick="setGlobalBadge('${b}')">${badgeShortLabel(b)}</button>`
+  ).join("");
 }
 
 /* ============================================================
@@ -1514,7 +1689,7 @@ async function aiDraftReply() {
   if (!msg) return;
   if (!aiReady()) { aiNotReadyToast(); return; }
   box.innerHTML = '<p style="color:var(--muted); font-size:12px">Drafting...</p>';
-  const prompt = `${PERSONA_INSTRUCTIONS}\n\n${badgeNoteFor(currentBadge)}\n\nRelevant policy:\n${policyContextFor(msg)}\n\nRelevant saved macros (when one genuinely fits, adapt/polish it for this specific message rather than writing something unrelated from scratch; only draft fully original when nothing here fits):\n${macroContextFor(msg)}\n\nCustomer message: "${msg}"\n\nWrite ONE best reply in the same language as the customer message. Use [brackets] for placeholders. Return only the reply text, no commentary.`;
+  const prompt = `${buildPersonaInstructions()}\n\n${badgeNoteFor(currentBadge)}\n\nRelevant policy:\n${policyContextFor(msg)}\n\nRelevant saved macros (when one genuinely fits, adapt/polish it for this specific message rather than writing something unrelated from scratch; only draft fully original when nothing here fits):\n${macroContextFor(msg)}\n\nCustomer message: "${msg}"\n\nWrite ONE best reply in the same language as the customer message. Use [brackets] for placeholders. Return only the reply text, no commentary.`;
   const reply = await aiGenerate(prompt);
   if (!reply) {
     // aiGenerate/aiChat already toasted the specific error — don't render a
@@ -1540,13 +1715,13 @@ function saveAiReplyToMacros(text) {
   openNodeModal({ parentId: null, forcedType: "macro", prefillText: text, prefillLabel: "" });
 }
 
-function flattenMacros(lang = state.lang) {
+function flattenMacros(lang = state.lang, party = state.activeParty) {
   const out = [];
   const walk = (nodes, path) => nodes.forEach(n => {
     if (n.type === "macro") out.push({ node: n, path });
     walk(n.children || [], [...path, n.label]);
   });
-  walk(state.trees[lang], []);
+  walk(state.trees[party][lang], []);
   return out;
 }
 
@@ -1560,108 +1735,190 @@ function suggestionHtml(m) {
 }
 
 /* ============================================================
-   AI ASSISTANT — interactive chat grounded in the policy database,
-   with customer-badge awareness and contact reason/log/hashtag generation.
+   AI ASSISTANT — interactive chat grounded in the policy database, with
+   customer-badge awareness and contact reason/log/hashtag generation.
+   Supports multiple independent, closable chats at once (e.g. one per
+   customer you're juggling), each scoped to the section it was opened in.
    ============================================================ */
-// Conversation history is session-only by design (matches the badge default
-// resetting to "grey" each session) — closing/reopening the tab starts fresh.
-let assistantHistory = [];
-
-function setCustomerBadge(b) {
-  currentBadge = b;
-  document.querySelectorAll(".cust-badge-btn").forEach(el => {
-    el.classList.toggle("active", el.dataset.badge === b);
-  });
+function getVisibleAssistantChats() {
+  return state.assistantChats.filter(c => c.party === state.activeParty);
 }
 
-function buildAssistantSystemPrompt(queryForRelevance) {
-  return `${PERSONA_INSTRUCTIONS}
+function getActiveAssistantChat() {
+  let chat = state.assistantChats.find(c => c.id === state.activeAssistantChatId && c.party === state.activeParty);
+  if (!chat) {
+    const visible = getVisibleAssistantChats();
+    chat = visible.length ? visible[0] : null;
+    state.activeAssistantChatId = chat ? chat.id : null;
+  }
+  return chat;
+}
 
-${badgeNoteFor(currentBadge)}
+function newAssistantChat() {
+  const visible = getVisibleAssistantChats();
+  const chat = {
+    id: uid(),
+    title: partyLabel(state.activeParty) + " Chat " + (visible.length + 1),
+    party: state.activeParty,
+    badge: "grey",
+    messages: [],
+    createdAt: new Date().toISOString()
+  };
+  state.assistantChats.push(chat);
+  state.activeAssistantChatId = chat.id;
+  save();
+  return chat;
+}
 
-Relevant ingested company policy (highest-priority source of truth when it applies):
-${policyContextFor(queryForRelevance)}
+function closeAssistantChat(id) {
+  event.stopPropagation();
+  state.assistantChats = state.assistantChats.filter(c => c.id !== id);
+  if (state.activeAssistantChatId === id) state.activeAssistantChatId = null;
+  save();
+  renderAssistantModalBody();
+}
 
-Relevant saved macros (when one of these genuinely fits, base your reply on it and adapt/polish it for the specific situation rather than writing something unrelated from scratch — this keeps replies consistent with what's already approved. Only draft something fully original when nothing here fits):
-${macroContextFor(queryForRelevance)}
+function switchAssistantChat(id) {
+  state.activeAssistantChatId = id;
+  save();
+  renderAssistantModalBody();
+}
 
-You're chatting with the support agent (not the customer) inside their internal macro tool. They may paste a customer's message and ask for a reply, ask a general question, or ask you to help reason through a case. If you're missing a detail you'd need to give a confident, correct answer (e.g. "did the customer confirm the item was missing, or just late?"), ask ONE short clarifying question instead of guessing. When you do give a reply meant to be sent to the customer, write it entirely in the customer's language, make it copy-paste ready, and don't wrap it in commentary or labels.`;
+function setCustomerBadge(b) {
+  const chat = getActiveAssistantChat();
+  if (!chat) return;
+  chat.badge = b;
+  save();
+  renderAssistantModalBody();
+}
+
+function buildAssistantSystemPrompt(queryForRelevance, party, badge) {
+  return `${buildPersonaInstructions(party)}
+
+${badgeNoteFor(badge)}
+
+Relevant ingested company policy for this section (highest-priority source of truth when it applies; may include a secondary policy from another section if nothing in this one matched):
+${policyContextFor(queryForRelevance, party)}
+
+Relevant saved macros for this section (when one of these genuinely fits, base your reply on it and adapt/polish it for the specific situation rather than writing something unrelated from scratch — this keeps replies consistent with what's already approved. Only draft something fully original when nothing here fits):
+${macroContextFor(queryForRelevance, party)}
+
+You're advising Mohammad, the agent (not the ${partyAudienceNoun(party)}), inside his internal macro tool. He may: paste a message and ask you to draft a reply; ask a direct factual question like "what contact reason should I use?" or "which hashtag fits this?", which you should answer with the specific short value itself, not a paragraph explaining how to find it; ask you to reason through a case; or paste an entire past chat and ask questions about it. Always ground answers in the policy above when it applies, and be exactly as certain as the policy actually lets you be, no more. If nothing above covers the question, you may give a general best-practice answer, but say plainly that it isn't policy-sourced so Mohammad knows to double-check it, rather than presenting a guess as certain. If you're missing a detail you'd need to answer confidently and correctly (e.g. "did the customer confirm the item was missing, or just late?"), ask ONE short clarifying question instead of guessing. Proactively mention required next steps you can see are implied by policy (logging the case, escalating, confirming a detail) even if Mohammad didn't explicitly ask. When you do give a reply meant for the ${partyAudienceNoun(party)}, write it entirely in their language, make it copy-paste-or-say-out-loud ready, and don't wrap it in commentary or labels.`;
 }
 
 function openAiAssistant() {
+  if (!getActiveAssistantChat() && !getVisibleAssistantChats().length) newAssistantChat();
   const modal = document.createElement("div");
   modal.className = "modal-backdrop";
+  modal.id = "assistant-modal";
   modal.innerHTML = `
     <div class="modal modal-lg">
-      <h3>🤖 AI Assistant</h3>
+      <h3>🤖 AI Assistant — ${partyIcon(state.activeParty)} ${escapeHtml(partyLabel(state.activeParty))}</h3>
       <p style="color:var(--muted); font-size:12px; margin-top:-6px">
-        Ask anything, or paste a customer message and ask for a reply. Grounded in your ingested policies
-        first, general judgment otherwise. The badge below is internal-only — it's never shown or hinted to the customer.
+        Ask anything, or paste a message and ask for a reply. Grounded in this section's policies first, others as backup.
+        The badge is internal-only — never shown or hinted to the ${escapeHtml(partyAudienceNoun(state.activeParty))}.
+        Open multiple chats for multiple cases at once; close any when you're done.
       </p>
-      <div class="cust-badge-row">
-        <button type="button" class="cust-badge-btn ${currentBadge==='grey'?'active':''}" data-badge="grey" onclick="setCustomerBadge('grey')">⚪ Grey (default)</button>
-        <button type="button" class="cust-badge-btn ${currentBadge==='red'?'active':''}" data-badge="red" onclick="setCustomerBadge('red')">🔴 Red</button>
-        <button type="button" class="cust-badge-btn ${currentBadge==='gold'?'active':''}" data-badge="gold" onclick="setCustomerBadge('gold')">⭐ Gold</button>
-      </div>
-      <div id="assistant-log" class="assistant-log"></div>
-      <div class="assistant-input-row">
-        <textarea id="assistant-input" rows="2" placeholder="Ask anything, or paste a customer message..." onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault(); sendAssistantMessage();}"></textarea>
-        <button class="btn primary" onclick="sendAssistantMessage()">Send</button>
-      </div>
-      <div class="modal-actions" style="justify-content:space-between; margin-top:12px">
-        <button class="btn ghost" onclick="assistantHistory=[]; renderAssistantChat(); document.getElementById('contact-packet-results').innerHTML='';">Clear Chat</button>
-        <div style="display:flex; gap:8px">
-          <button class="btn" onclick="generateContactPacket()">📋 Generate Contact Reason / Log / Hashtag</button>
-          <button class="btn ghost" onclick="closeModal()">Close</button>
-        </div>
-      </div>
-      <div id="contact-packet-results" style="margin-top:10px"></div>
+      <div id="assistant-body"></div>
     </div>
   `;
   document.getElementById("modal-root").appendChild(modal);
+  renderAssistantModalBody();
+}
+
+function renderAssistantModalBody() {
+  const body = document.getElementById("assistant-body");
+  if (!body) return;
+  const chats = getVisibleAssistantChats();
+  const chat = getActiveAssistantChat();
+
+  const tabsHtml = `
+    <div class="assistant-tabs">
+      ${chats.map(c => `
+        <div class="assistant-tab ${chat && c.id === chat.id ? "active" : ""}" onclick="switchAssistantChat('${c.id}')">
+          <span>${escapeHtml(c.title)}</span>
+          <span class="close-x" onclick="closeAssistantChat('${c.id}')">✕</span>
+        </div>
+      `).join("")}
+      <button class="btn sm" onclick="newAssistantChat(); renderAssistantModalBody();">+ New Chat</button>
+    </div>
+  `;
+
+  if (!chat) {
+    body.innerHTML = tabsHtml + `<p style="color:var(--muted); font-size:12px; margin-top:12px">No open chats in ${escapeHtml(partyLabel(state.activeParty))} — click + New Chat to start one.</p>`;
+    return;
+  }
+
+  body.innerHTML = tabsHtml + `
+    <div class="cust-badge-row" style="margin-top:12px">
+      <button type="button" class="cust-badge-btn ${chat.badge==='grey'?'active':''}" onclick="setCustomerBadge('grey')">⚪ Grey (default)</button>
+      <button type="button" class="cust-badge-btn ${chat.badge==='red'?'active':''}" onclick="setCustomerBadge('red')">🔴 Red</button>
+      <button type="button" class="cust-badge-btn ${chat.badge==='gold'?'active':''}" onclick="setCustomerBadge('gold')">⭐ Gold</button>
+      <button type="button" class="cust-badge-btn ${chat.badge==='gold2'?'active':''}" onclick="setCustomerBadge('gold2')">⭐⭐ Gold</button>
+    </div>
+    <div id="assistant-log" class="assistant-log"></div>
+    <div class="assistant-input-row">
+      <textarea id="assistant-input" rows="2" placeholder="Ask anything, or paste a message..." onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault(); sendAssistantMessage();}"></textarea>
+      <button class="btn primary" onclick="sendAssistantMessage()">Send</button>
+    </div>
+    <div class="modal-actions" style="justify-content:space-between; margin-top:12px">
+      <button class="btn ghost" onclick="if(confirm('Clear messages in this chat?')){ const c=getActiveAssistantChat(); if(c){c.messages=[]; save();} renderAssistantModalBody(); }">Clear Messages</button>
+      <div style="display:flex; gap:8px">
+        <button class="btn" onclick="generateContactPacket()">📋 Generate Contact Reason / Log / Hashtag</button>
+        <button class="btn ghost" onclick="closeModal()">Close</button>
+      </div>
+    </div>
+    <div id="contact-packet-results" style="margin-top:10px"></div>
+  `;
   renderAssistantChat();
 }
 
 function renderAssistantChat() {
   const log = document.getElementById("assistant-log");
-  if (!log) return;
-  log.innerHTML = assistantHistory.map(m => `
+  const chat = getActiveAssistantChat();
+  if (!log || !chat) return;
+  log.innerHTML = chat.messages.map(m => `
     <div class="chat-msg ${m.role}">
       <div class="chat-bubble">${escapeHtml(m.content)}</div>
       ${m.role === "assistant" ? `<button class="btn sm ghost" onclick="navigator.clipboard.writeText(${JSON.stringify(m.content)}); toast('Copied')">📋 Copy</button>${toneButtonsHtml(m.content, null)}` : ""}
     </div>
-  `).join("") || `<p style="color:var(--muted); font-size:12px">No messages yet — ask anything or paste a customer message above.</p>`;
+  `).join("") || `<p style="color:var(--muted); font-size:12px">No messages yet — ask anything or paste a message above.</p>`;
   log.scrollTop = log.scrollHeight;
 }
 
 async function sendAssistantMessage() {
+  const chat = getActiveAssistantChat();
+  if (!chat) return;
   const input = document.getElementById("assistant-input");
   const msg = (input.value || "").trim();
   if (!msg) return;
   if (!aiReady()) { aiNotReadyToast(); return; }
-  assistantHistory.push({ role: "user", content: msg });
+  chat.messages.push({ role: "user", content: msg });
   input.value = "";
+  save();
   renderAssistantChat();
-  const sys = buildAssistantSystemPrompt(msg);
-  const messages = [{ role: "system", content: sys }, ...assistantHistory.slice(-12)];
+  const sys = buildAssistantSystemPrompt(msg, chat.party, chat.badge);
+  const messages = [{ role: "system", content: sys }, ...chat.messages.slice(-12)];
   const reply = await aiChat(messages);
   if (reply) {
-    assistantHistory.push({ role: "assistant", content: reply.trim() });
+    chat.messages.push({ role: "assistant", content: reply.trim() });
+    save();
     renderAssistantChat();
   }
 }
 
 async function generateContactPacket() {
+  const chat = getActiveAssistantChat();
   const box = document.getElementById("contact-packet-results");
-  if (!assistantHistory.length) { toast("Chat about the case first, then generate the packet."); return; }
+  if (!chat || !chat.messages.length) { toast("Chat about the case first, then generate the packet."); return; }
   if (!aiReady()) { aiNotReadyToast(); return; }
   box.innerHTML = '<p style="color:var(--muted); font-size:12px">Generating...</p>';
-  const transcript = assistantHistory.map(m => `${m.role === "user" ? "Agent" : "Assistant"}: ${m.content}`).join("\n");
-  const sys = buildAssistantSystemPrompt(transcript);
+  const transcript = chat.messages.map(m => `${m.role === "user" ? "Agent" : "Assistant"}: ${m.content}`).join("\n");
+  const sys = buildAssistantSystemPrompt(transcript, chat.party, chat.badge);
   const prompt = `${sys}
 
-Existing categories already used internally (folder/macro titles and policy names) — prefer reusing one of these verbatim for contactReason and/or hashtag when it genuinely fits the case, since consistent tagging matters for reporting. Only invent a new short one when nothing here fits, so Mohammad can tell it's a fresh suggestion he should double-check:
-${categoryCandidates().join(", ") || "(none saved yet)"}
+Existing categories already used internally in this section (folder/macro titles and policy names) — prefer reusing one of these verbatim for contactReason and/or hashtag when it genuinely fits the case, since consistent tagging matters for reporting. Only invent a new short one when nothing here fits, so Mohammad can tell it's a fresh suggestion he should double-check:
+${categoryCandidates(chat.party).join(", ") || "(none saved yet)"}
 
 Based on the conversation below, produce STRICT JSON only (no markdown fences, no prose) with exactly this shape:
 {"contactReason":"short 2-6 word phrase, e.g. 'Order marked delivered, not received'","log":"2-4 sentence professional internal log: what happened and how it was resolved, written the way a real support log should read since the customer can request it","hashtag":"#OneWordOrCamelCaseClassificationTag"}
@@ -1716,7 +1973,7 @@ function toneButtonsHtml(text, sourceNodeId) {
 async function rewriteToneFor(text, tone, sourceNodeId) {
   if (!aiReady()) { aiNotReadyToast(); return; }
   toast(`Rewriting as ${tone}...`);
-  const prompt = `${PERSONA_INSTRUCTIONS}\n\nRewrite this customer service message with a more ${tone} tone, keeping it faithful to policy. Preserve [bracket placeholders] exactly. Keep the same language. Return only the rewritten message, no commentary:\n\n${text}`;
+  const prompt = `${buildPersonaInstructions()}\n\nRewrite this customer service message with a more ${tone} tone, keeping it faithful to policy. Preserve [bracket placeholders] exactly. Keep the same language. Return only the rewritten message, no commentary:\n\n${text}`;
   const out = await aiGenerate(prompt);
   if (out) presentAiRewriteResult(`${tone.charAt(0).toUpperCase()}${tone.slice(1)} Version`, out.trim(), sourceNodeId);
 }
@@ -1725,7 +1982,7 @@ async function aiRewriteFromIntentFor(sourceNodeId) {
   const intent = prompt("Describe the intent (e.g. 'push back about cancellation policy'):");
   if (!intent) return;
   if (!aiReady()) { aiNotReadyToast(); return; }
-  const prompt = `${PERSONA_INSTRUCTIONS}\n\nWrite a customer service reply for this intent: ${intent}\n\nRelevant policy:\n${policyContextFor(intent)}\n\nRelevant saved macros (adapt one if it fits, otherwise write fresh but stay consistent with their tone/policy):\n${macroContextFor(intent)}\n\nUse [brackets] for placeholders. Return only the reply, no commentary.`;
+  const prompt = `${buildPersonaInstructions()}\n\nWrite a customer service reply for this intent: ${intent}\n\nRelevant policy:\n${policyContextFor(intent)}\n\nRelevant saved macros (adapt one if it fits, otherwise write fresh but stay consistent with their tone/policy):\n${macroContextFor(intent)}\n\nUse [brackets] for placeholders. Return only the reply, no commentary.`;
   const draft = await aiGenerate(prompt);
   if (draft) presentAiRewriteResult(`AI Draft: ${intent.slice(0, 40)}`, draft.trim(), sourceNodeId);
 }
