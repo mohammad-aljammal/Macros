@@ -234,6 +234,8 @@
 
   /* Customer badge selector (internal-only classification, not shown to customer) */
   .cust-badge-row { display: flex; gap: 8px; margin: 4px 0 12px; flex-wrap: wrap; }
+  .case-context-row { display: flex; gap: 6px; margin: 0 0 10px; flex-wrap: wrap; }
+  .case-ctx-select { font-size: 11px; padding: 3px 6px; border-radius: 6px; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); }
   .cust-badge-btn {
     padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border);
     background: var(--panel-2); color: var(--muted); font-size: 12px; cursor: pointer;
@@ -282,6 +284,25 @@
   .stat-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed var(--border); font-size: 13px; }
   .stat-row:last-child { border: none; }
   .stat-row .count { color: var(--accent); font-weight: 600; }
+
+  .policy-group { margin-bottom: 14px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  .policy-group-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font-size: 13px; }
+  .policy-code-badge {
+    background: rgba(110,168,254,0.18); border: 1px solid var(--accent); color: var(--accent);
+    font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px;
+  }
+  .policy-chunk-row { padding-left: 8px; }
+  .cond-badges { display: inline-flex; gap: 3px; flex-wrap: wrap; margin-left: 6px; vertical-align: middle; }
+  .cond-badge {
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
+    font-size: 10px; padding: 1px 5px; border-radius: 4px;
+  }
+  .source-pills { margin-top: 6px; font-size: 11px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+  .source-pill {
+    background: rgba(126,226,184,0.12); border: 1px solid var(--accent-2); color: var(--accent-2);
+    padding: 1px 7px; border-radius: 999px; cursor: pointer;
+  }
+  .source-pill:hover { background: rgba(126,226,184,0.25); }
 
   [dir="rtl"] .col.tree { border-right: none; border-left: 1px solid var(--border); }
   [dir="rtl"] .col.side { border-left: none; border-right: 1px solid var(--border); }
@@ -332,6 +353,7 @@
     <div class="card">
       <h4>🤖 AI Scan — Match Customer Message</h4>
       <div class="cust-badge-row" id="global-badge-row" style="margin-bottom:6px"></div>
+      <div class="case-context-row" id="global-case-context-row"></div>
       <textarea id="ai-scan-input" rows="4" style="width:100%" placeholder="Paste customer message here..."></textarea>
       <div class="toolbar">
         <button class="btn primary" onclick="aiScanMatches()">Find Best Match</button>
@@ -467,6 +489,9 @@ function loadState() {
       parsed.policies.forEach(p => { if (!p.party) p.party = "general"; });
       if (!parsed.assistantChats) parsed.assistantChats = [];
       if (typeof parsed.activeAssistantChatId === "undefined") parsed.activeAssistantChatId = null;
+      // Structured case facts for AI Scan/Draft Reply (global — that panel
+      // isn't per-chat). AI Assistant carries the same shape per-chat instead.
+      if (!parsed.caseContext) parsed.caseContext = { country: "", orderType: "", channel: "" };
       return parsed;
     }
   } catch (e) {}
@@ -498,6 +523,12 @@ function defaultState() {
     aiBackend: "gemini",
     localModelSize: "1.5b",
     openRouterModels: DEFAULT_OPENROUTER_MODELS,
+    // Structured, explicitly-set case facts — deliberately NOT inferred from
+    // free text, since that's fragile. These are what the hard-filter side of
+    // policy retrieval uses to exclude genuinely incompatible decision-tree
+    // branches (e.g. a chunk reached via "Country: France" is excluded when
+    // this says "uk"). Empty string = "not set / any" for that dimension.
+    caseContext: { country: "", orderType: "", channel: "" },
     favorites: [],
     usage: {},
     // Folder ids the user has explicitly pinned open; they stay expanded across reloads.
@@ -1239,16 +1270,34 @@ function openSettings() {
         <h4>📚 Policy Database</h4>
         <p style="color:var(--muted); font-size:12px; margin:0 0 8px">
           Raw ingested policy text that grounds every AI feature. Open one to view or edit it, or delete anything outdated or wrong.
+          Chunks imported from the Shelf extractor are grouped by article, with their decision-tree path and hard condition tags shown.
         </p>
-        ${state.policies.length ? state.policies.map(p => `
-          <div class="stat-row">
-            <span style="cursor:pointer" onclick="openPolicyEditor('${p.id}')">${p.party === 'general' ? '🌐' : partyIcon(p.party)} ${escapeHtml(p.title)} <span style="color:var(--muted); font-size:11px">(${p.party === 'general' ? 'General' : partyLabel(p.party)}, ${(p.text||'').length} chars)</span></span>
-            <span style="display:flex; gap:4px">
-              <button class="btn sm" onclick="openPolicyEditor('${p.id}')">Open</button>
-              <button class="btn sm danger" onclick="if(confirm('Delete policy &quot;${escapeHtml(p.title).replace(/"/g,'&quot;')}&quot;?')) deletePolicy('${p.id}')">Delete</button>
-            </span>
+        <div style="margin-bottom:10px; padding-bottom:10px; border-bottom:1px dashed var(--border)">
+          <input type="file" id="article-json-input-settings" accept=".json" multiple />
+          <button class="btn sm primary" onclick="importArticleJSON(document.getElementById('article-json-input-settings').files)">📥 Import Article JSON</button>
+        </div>
+        ${groupedPolicyList().map(g => `
+          <div class="policy-group">
+            <div class="policy-group-header">
+              ${g.policyCode ? `<span class="policy-code-badge">${escapeHtml(g.policyCode)}</span>` : ""}
+              <b>${escapeHtml(g.article || g.chunks[0].title)}</b>
+              <span style="color:var(--muted); font-size:11px">${g.chunks.length} chunk${g.chunks.length === 1 ? "" : "s"}</span>
+            </div>
+            ${g.chunks.map(p => `
+              <div class="stat-row policy-chunk-row">
+                <span style="cursor:pointer; flex:1" onclick="openPolicyEditor('${p.id}')">
+                  ${p.party === "general" ? "🌐" : partyIcon(p.party)}
+                  ${escapeHtml(p.path && p.path.length ? p.path.map(x => x.a).filter(Boolean).join(" › ") : p.title)}
+                  <span class="cond-badges">${(p.conditions || []).slice(0, 6).map(c => `<span class="cond-badge">${escapeHtml(c)}</span>`).join("")}</span>
+                </span>
+                <span style="display:flex; gap:4px">
+                  <button class="btn sm" onclick="openPolicyEditor('${p.id}')">Open</button>
+                  <button class="btn sm danger" onclick="if(confirm('Delete this chunk?')) deletePolicy('${p.id}')">Delete</button>
+                </span>
+              </div>
+            `).join("")}
           </div>
-        `).join('') : '<p style="color:var(--muted); font-size:12px">No policies ingested yet — use 🧠 Ingest Policy.</p>'}
+        `).join("") || '<p style="color:var(--muted); font-size:12px">No policies ingested yet — use 🧠 Ingest Policy.</p>'}
       </div>
       <div class="card">
         <h4>📈 Velocity — Most Used</h4>
@@ -1290,6 +1339,17 @@ function openPolicyModal() {
         folder/macro structure (sub-folders and sub-macros where the policy actually has sub-cases)
         and mirrors it into Arabic.
       </p>
+      <div class="card" style="margin-bottom:14px">
+        <h4>📥 Import Article (JSON)</h4>
+        <p style="color:var(--muted); font-size:12px; margin:0 0 8px">
+          Import one or more <code>.json</code> files from the Shelf article extractor. Each decision-tree
+          branch becomes its own precisely-tagged policy chunk (imports into
+          <b>${partyIcon(state.activeParty)} ${partyLabel(state.activeParty)}</b> — switch sections first if this belongs elsewhere).
+          Re-importing the same article replaces its old chunks automatically.
+        </p>
+        <input type="file" id="article-json-input" accept=".json" multiple />
+        <button class="btn primary" style="margin-top:8px" onclick="importArticleJSON(document.getElementById('article-json-input').files)">Import Selected File(s)</button>
+      </div>
       <div class="row">
         <label>Section this policy belongs to</label>
         <select id="policy-party">
@@ -1324,15 +1384,90 @@ function openPolicyModal() {
 // it's the raw source text the AI reasons from, not the polished replies.
 // Tagged with whichever section was active when it was ingested; retrieval
 // checks that section's own policies first, then falls back to the rest.
-function addPolicyRecord(title, text, party = state.activeParty) {
-  state.policies.push({
+function addPolicyRecord(title, text, party = state.activeParty, extra) {
+  const rec = {
     id: uid(),
     title: (title || "").trim() || ("Policy " + (state.policies.length + 1)),
     text,
     party,
     ingestedAt: new Date().toISOString()
-  });
+  };
+  if (extra && typeof extra === "object") {
+    // Optional structured fields from the Shelf extractor's JSON chunks.
+    // Everything is optional so legacy free-text policies keep working.
+    // `conditions` = HARD tags (from the actual decision-tree branch taken —
+    // safe to hard-filter on). `mentioned` = SOFT tags (from scanning the
+    // full body text — ranking signal only, since shared ancestor text can
+    // make these misleading if trusted as a filter).
+    if (extra.article) rec.article = extra.article;
+    if (extra.policyCode) rec.policyCode = extra.policyCode;
+    if (extra.articleId) rec.articleId = extra.articleId;
+    if (extra.url) rec.url = extra.url;
+    if (extra.path) rec.path = extra.path;
+    if (extra.conditions) rec.conditions = extra.conditions;
+    if (extra.mentioned) rec.mentioned = extra.mentioned;
+  }
+  state.policies.push(rec);
   save();
+  return rec;
+}
+
+// Imports one or more JSON files produced by the Shelf extractor
+// (article/policyCode/gemId/chunks[]). Each chunk becomes its own policy
+// record, tagged to whichever section is currently active, so retrieval can
+// hard-filter/rank across genuinely separate, precisely-scoped branches
+// instead of one giant free-text article. Re-importing the same article
+// (matched by gemId) replaces its old chunks so stale branches don't pile up.
+async function importArticleJSON(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) { toast("Choose at least one .json file first"); return; }
+  const targetParty = document.getElementById("policy-party") ? document.getElementById("policy-party").value : state.activeParty;
+  let totalChunks = 0, totalArticles = 0;
+  for (const file of files) {
+    try {
+      const raw = await file.text();
+      const parsed = JSON.parse(raw);
+      const articles = Array.isArray(parsed) ? parsed : [parsed];
+      for (const art of articles) {
+        if (!art || !Array.isArray(art.chunks)) continue;
+        const articleName = art.article || file.name.replace(/\.json$/i, "");
+        const articleId = art.gemId || uid();
+        if (art.gemId) {
+          // Replace this article's existing chunks (any section) so a
+          // re-export after the source changed doesn't leave stale branches.
+          state.policies = state.policies.filter(p => p.articleId !== art.gemId);
+        }
+        for (const ch of art.chunks) {
+          if (!ch || !ch.text) continue;
+          const normPath = (ch.path || []).map(x => {
+            if (Array.isArray(x)) return { q: x[0] || "", a: x[1] || "" };
+            if (x && typeof x === "object") return { q: x.q || "", a: x.a || "" };
+            return { q: "", a: String(x || "") };
+          });
+          const pathLabel = normPath.map(x => x.a).filter(Boolean).join(" › ");
+          const title = pathLabel ? `${articleName} › ${pathLabel}` : (ch.title || articleName);
+          addPolicyRecord(title, ch.text, targetParty, {
+            article: articleName,
+            policyCode: art.policyCode || null,
+            articleId,
+            url: art.url,
+            path: normPath,
+            conditions: ch.conditions || [],
+            mentioned: ch.mentioned || []
+          });
+          totalChunks++;
+        }
+        totalArticles++;
+      }
+    } catch (e) {
+      console.error(e);
+      toast(`Failed to import ${file.name}: ${e.message}`);
+    }
+  }
+  save();
+  toast(`Imported ${totalArticles} article(s) → ${totalChunks} chunk(s) into ${partyLabel(targetParty)}`);
+  closeModal();
+  if (typeof openSettings === "function") openSettings();
 }
 
 function deletePolicy(id) {
@@ -1345,11 +1480,22 @@ function deletePolicy(id) {
 function openPolicyEditor(id) {
   const p = state.policies.find(x => x.id === id);
   if (!p) return;
+  const metaBits = [];
+  if (p.policyCode) metaBits.push(`Code: <b>${escapeHtml(p.policyCode)}</b>`);
+  if (p.article) metaBits.push(`Article: ${escapeHtml(p.article)}`);
+  if (p.url) metaBits.push(`<a href="${escapeHtml(p.url)}" target="_blank" rel="noopener" style="color:var(--accent)">Source link</a>`);
+  const pathHtml = (p.path && p.path.length) ? `<div class="row"><label>Decision-tree path</label><div style="font-size:12px; color:var(--muted)">${p.path.map(x => escapeHtml(x.a || "")).filter(Boolean).join(" › ")}</div></div>` : "";
+  const condHtml = (p.conditions && p.conditions.length) ? `<div class="row"><label>Hard conditions (from the actual branch — used to filter)</label><div class="cond-badges">${p.conditions.map(c => `<span class="cond-badge">${escapeHtml(c)}</span>`).join("")}</div></div>` : "";
+  const mentionedHtml = (p.mentioned && p.mentioned.length) ? `<div class="row"><label>Mentioned in body (soft signal only, not used to filter)</label><div class="cond-badges">${p.mentioned.map(c => `<span class="cond-badge">${escapeHtml(c)}</span>`).join("")}</div></div>` : "";
   const modal = document.createElement("div");
   modal.className = "modal-backdrop";
   modal.innerHTML = `
     <div class="modal">
       <h3>📚 Policy: ${escapeHtml(p.title)}</h3>
+      ${metaBits.length ? `<p style="color:var(--muted); font-size:12px; margin-top:-8px">${metaBits.join(" · ")}</p>` : ""}
+      ${pathHtml}
+      ${condHtml}
+      ${mentionedHtml}
       <div class="row">
         <label>Section</label>
         <select id="edit-policy-party">
@@ -1392,22 +1538,126 @@ function savePolicyEdit(id) {
 
 const POLICY_STOPWORDS = new Set(["the","a","an","is","are","was","were","to","of","and","or","in","on","for","with","this","that","it","be","if","we","our","you","your","i","he","she","they","them","his","her","its","from","as","at","by","not","no","do","does","did","has","have","had","will","would","can","could","should","must","اذا","في","من","الى","على","عن","هذا","هذه","و","او","ان","كان"]);
 
+// Structured case-context options shown in the UI, and the exact condition
+// tag each one corresponds to (must match the Shelf extractor's tag names).
+const COUNTRY_OPTIONS = [
+  { value: "uk", label: "UK", tag: "country_uk" },
+  { value: "ie", label: "Ireland", tag: "country_ie" },
+  { value: "fr", label: "France", tag: "country_fr" },
+  { value: "it", label: "Italy", tag: "country_it" },
+  { value: "ae", label: "UAE", tag: "country_ae" },
+  { value: "kw", label: "Kuwait", tag: "country_kw" },
+  { value: "qa", label: "Qatar", tag: "country_qa" }
+];
+const ORDER_TYPE_OPTIONS = [
+  { value: "odc", label: "Core ODC", tag: "order_core_odc" },
+  { value: "odg", label: "Core ODG", tag: "order_core_odg" },
+  { value: "restaurant", label: "Core Restaurant", tag: "order_core_restaurant" },
+  { value: "hop", label: "HOP", tag: "order_hop" },
+  { value: "grocery", label: "Grocery", tag: "order_grocery" },
+  { value: "plus", label: "Plus", tag: "order_plus" }
+];
+const CHANNEL_OPTIONS = [
+  { value: "chat", label: "Chat", tag: "channel_chat" },
+  { value: "voice", label: "Voice / Call", tag: "channel_voice" }
+];
+const CASE_DIMENSIONS = { country: COUNTRY_OPTIONS, orderType: ORDER_TYPE_OPTIONS, channel: CHANNEL_OPTIONS };
+
+// A chunk is INCOMPATIBLE with the case only when it carries a HARD (path-
+// derived) tag for a dimension the agent has actually set, and that tag names
+// a DIFFERENT value than the one set (e.g. chunk says country_fr, case says
+// uk). A chunk with no tag for that dimension is silent/universal on it, not
+// excluded. Dimensions the agent hasn't set impose no constraint at all.
+function isChunkCompatibleWithCase(p, caseContext) {
+  const hard = p.conditions || [];
+  if (!hard.length || !caseContext) return true;
+  for (const dim of Object.keys(CASE_DIMENSIONS)) {
+    const val = caseContext[dim];
+    if (!val) continue;
+    const opt = CASE_DIMENSIONS[dim].find(o => o.value === val);
+    if (!opt) continue;
+    const dimTags = CASE_DIMENSIONS[dim].map(o => o.tag);
+    const present = hard.filter(t => dimTags.includes(t));
+    if (present.length && !present.includes(opt.tag)) return false;
+  }
+  return true;
+}
+
+// Groups policy chunks by source article (articleId) for display in Settings.
+// Free-text policies with no articleId each become their own single-chunk group.
+function groupedPolicyList() {
+  const groups = new Map();
+  state.policies.forEach(p => {
+    const key = p.articleId || ("standalone:" + p.id);
+    if (!groups.has(key)) groups.set(key, { articleId: p.articleId || null, article: p.article || null, policyCode: p.policyCode || null, chunks: [] });
+    groups.get(key).chunks.push(p);
+  });
+  return Array.from(groups.values());
+}
+
+function badgeConditionTags(badge) {
+  if (badge === "red") return ["red_badge", "red_badge_no_star", "red_badge_with_star"];
+  if (badge === "gold" || badge === "gold2") return ["gold_badge"];
+  return [];
+}
+
 // Cheap, dependency-free "poor man's RAG": scores saved policies by keyword
-// overlap with the query and returns the most relevant few. Checks the active
-// section's own policies (plus "general" cross-section ones) first; only
-// falls back to searching every other section if nothing scores there, per
-// "use any policy if it can't find something relevant in this section."
-function getRelevantPolicies(query, max = 3, party = state.activeParty) {
+// overlap with the query and returns the most relevant few. Two tiers:
+// 1) HARD FILTER — exclude chunks whose own decision-tree branch conditions
+//    contradict a case fact Mohammad has actually set (see
+//    isChunkCompatibleWithCase). This is what stops the AI from being handed
+//    a mismatched or contradicting branch.
+// 2) SOFT RANK — within whatever's compatible, score by keyword overlap
+//    (weighted title > article > path > body) plus boosts for badge and
+//    case-context tag matches. `mentioned` (body-scanned) tags contribute a
+//    smaller boost than `conditions` (path-derived) tags, since they're a
+//    weaker signal by construction.
+// Checks the active section's own policies (plus "general" cross-section
+// ones) first; only falls back to searching every other section if nothing
+// scores there, per "use any policy if it can't find something relevant."
+function getRelevantPolicies(query, max = 3, party = state.activeParty, caseContext = state.caseContext, badge = currentBadge) {
   if (!state.policies.length) return [];
   const terms = (query || "").toLowerCase().split(/[^a-z0-9\u0600-\u06FF]+/i).filter(w => w.length > 2 && !POLICY_STOPWORDS.has(w));
   if (!terms.length) return [];
+
+  const badgeTags = badgeConditionTags(badge);
   const scoreOf = (p) => {
-    const hay = (p.title + " " + p.text).toLowerCase();
-    return terms.reduce((s, w) => s + (hay.includes(w) ? 1 : 0), 0);
+    const titleHay = (p.title || "").toLowerCase();
+    const articleHay = (p.article || "").toLowerCase();
+    const pathHay = (p.path || []).map(x => (x && typeof x === "object") ? `${x.q || ""} ${x.a || ""}` : String(x || "")).join(" ").toLowerCase();
+    const bodyHay = (p.text || "").toLowerCase();
+    let score = 0;
+    terms.forEach(w => {
+      if (titleHay.includes(w)) score += 3;
+      if (articleHay.includes(w)) score += 2;
+      if (pathHay.includes(w)) score += 2;
+      if (bodyHay.includes(w)) score += 1;
+    });
+    (p.conditions || []).forEach(tag => {
+      if (badgeTags.includes(tag)) score += 5;
+      Object.values(CASE_DIMENSIONS).forEach(opts => {
+        const opt = opts.find(o => o.tag === tag);
+        if (opt && caseContext && Object.keys(CASE_DIMENSIONS).some(dim => caseContext[dim] === opt.value)) score += 4;
+      });
+    });
+    (p.mentioned || []).forEach(tag => {
+      if (badgeTags.includes(tag)) score += 1;
+    });
+    return score;
   };
+
   const ownPool = state.policies.filter(p => p.party === party || p.party === "general");
-  let scored = ownPool.map(p => ({ p, score: scoreOf(p) })).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
+  const compatible = ownPool.filter(p => isChunkCompatibleWithCase(p, caseContext));
+
+  let scored = compatible.map(p => ({ p, score: scoreOf(p) })).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
   if (scored.length) return scored.slice(0, max).map(x => x.p);
+
+  // Nothing compatible scored — fall back to this section's full pool
+  // (ignoring the hard filter) so a case-context mismatch never silently
+  // returns nothing; policyContextFor() flags this fallback explicitly.
+  scored = ownPool.map(p => ({ p, score: scoreOf(p) })).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
+  if (scored.length) return scored.slice(0, max).map(x => x.p);
+
   scored = state.policies.map(p => ({ p, score: scoreOf(p) })).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
   return scored.slice(0, max).map(x => x.p);
 }
@@ -1417,13 +1667,38 @@ function getRelevantPolicies(query, max = 3, party = state.activeParty) {
 // matched, so it reasons from general judgment instead of guessing at policy.
 // Flags any result pulled in from a DIFFERENT section so the AI treats it as
 // secondary, not as this section's own rule.
-function policyContextFor(query, party = state.activeParty) {
-  const rel = getRelevantPolicies(query, 3, party);
+function policyContextFor(query, party = state.activeParty, caseContext = state.caseContext, badge = currentBadge) {
+  const rel = getRelevantPolicies(query, 3, party, caseContext, badge);
   if (!rel.length) return "(No specific ingested policy matched this in any section — use sound general customer-service judgment, and say plainly that this isn't policy-sourced.)";
   return rel.map(p => {
     const scopeNote = p.party === party ? "" : p.party === "general" ? " (general, cross-section policy)" : ` (from the ${partyLabel(p.party)} section — no ${partyLabel(party)}-specific policy was found for this, so use with care and flag it as a secondary source)`;
-    return `[Policy: ${p.title}${scopeNote}]\n${p.text}`;
+    const crumbs = [];
+    if (p.policyCode) crumbs.push(`[${p.policyCode}]`);
+    if (p.article) crumbs.push(p.article);
+    (p.path || []).forEach(x => { const a = (x && typeof x === "object") ? x.a : x; if (a) crumbs.push(a); });
+    const header = crumbs.length ? crumbs.join(" › ") : p.title;
+    return `[Policy: ${header}${scopeNote}]\n${p.text}`;
   }).join("\n\n");
+}
+
+// Returns which exact chunks would ground a given query — used to show
+// Mohammad a "Sources used" citation so he can verify the raw text himself
+// instead of trusting the AI's paraphrase blindly. Same retrieval call
+// policyContextFor() makes internally, exposed for UI display.
+function policySourcesFor(query, party = state.activeParty, caseContext = state.caseContext, badge = currentBadge) {
+  return getRelevantPolicies(query, 3, party, caseContext, badge);
+}
+
+// Renders clickable source pills (opens the raw verbatim policy in the
+// editor) under an AI answer. This is the actual safety net: rather than
+// trusting the AI's paraphrase, Mohammad can check the literal source text
+// in two clicks before acting on it.
+function sourcesHtml(sources) {
+  if (!sources || !sources.length) return "";
+  return `<div class="source-pills">📄 Sources: ${sources.map(p => {
+    const label = p.policyCode ? `[${p.policyCode}] ${p.path && p.path.length ? p.path[p.path.length-1].a : p.title}` : p.title;
+    return `<span class="source-pill" onclick="openPolicyEditor('${p.id}')">${escapeHtml(label.slice(0, 40))}</span>`;
+  }).join("")}</div>`;
 }
 
 // Same idea as getRelevantPolicies/policyContextFor but over the actual saved
@@ -1650,6 +1925,27 @@ function renderGlobalBadgeRow() {
   el.innerHTML = ["grey", "red", "gold", "gold2"].map(b =>
     `<button type="button" class="cust-badge-btn${currentBadge === b ? " active" : ""}" onclick="setGlobalBadge('${b}')">${badgeShortLabel(b)}</button>`
   ).join("");
+  const ctxEl = document.getElementById("global-case-context-row");
+  if (ctxEl) ctxEl.innerHTML = caseContextSelectorsHtml(state.caseContext, "setGlobalCaseContext");
+}
+
+function setGlobalCaseContext(dim, value) {
+  state.caseContext[dim] = value;
+  save();
+  renderGlobalBadgeRow();
+}
+
+// Shared builder for the three structured case-fact dropdowns (Country /
+// Order Type / Channel). Explicit selectors on purpose, not inferred from
+// free text — that's what lets policy retrieval hard-filter reliably instead
+// of guessing from keywords in whatever Mohammad happened to type.
+function caseContextSelectorsHtml(ctx, setterFnName) {
+  const build = (dim, options, label) => `
+    <select class="case-ctx-select" onchange="${setterFnName}('${dim}', this.value)" title="${label}">
+      <option value="">${label}: Any</option>
+      ${options.map(o => `<option value="${o.value}" ${ctx && ctx[dim] === o.value ? "selected" : ""}>${label}: ${o.label}</option>`).join("")}
+    </select>`;
+  return build("country", COUNTRY_OPTIONS, "Country") + build("orderType", ORDER_TYPE_OPTIONS, "Order Type") + build("channel", CHANNEL_OPTIONS, "Channel");
 }
 
 /* ============================================================
@@ -1689,7 +1985,7 @@ async function aiDraftReply() {
   if (!msg) return;
   if (!aiReady()) { aiNotReadyToast(); return; }
   box.innerHTML = '<p style="color:var(--muted); font-size:12px">Drafting...</p>';
-  const prompt = `${buildPersonaInstructions()}\n\n${badgeNoteFor(currentBadge)}\n\nRelevant policy:\n${policyContextFor(msg)}\n\nRelevant saved macros (when one genuinely fits, adapt/polish it for this specific message rather than writing something unrelated from scratch; only draft fully original when nothing here fits):\n${macroContextFor(msg)}\n\nCustomer message: "${msg}"\n\nWrite ONE best reply in the same language as the customer message. Use [brackets] for placeholders. Return only the reply text, no commentary.`;
+  const prompt = `${buildPersonaInstructions()}\n\n${badgeNoteFor(currentBadge)}\n\nRelevant policy:\n${policyContextFor(msg)}\n\nRelevant saved macros (when one genuinely fits, adapt/polish it for this specific message rather than writing something unrelated from scratch; only draft fully original when nothing here fits):\n${macroContextFor(msg)}\n\n${STRICT_POLICY_ADHERENCE}\n\nCustomer message: "${msg}"\n\nWrite ONE best reply in the same language as the customer message. Use [brackets] for placeholders. Return only the reply text, no commentary.`;
   const reply = await aiGenerate(prompt);
   if (!reply) {
     // aiGenerate/aiChat already toasted the specific error — don't render a
@@ -1706,6 +2002,7 @@ async function aiDraftReply() {
         <button class="btn sm" onclick="navigator.clipboard.writeText(${JSON.stringify(reply)}); toast('Copied')">📋 Copy</button>
         <button class="btn sm primary" onclick='saveAiReplyToMacros(${JSON.stringify(reply)})'>+ Add to Macros</button>
       </div>
+      ${sourcesHtml(policySourcesFor(msg))}
       ${toneButtonsHtml(reply, null)}
     </div>
   `;
@@ -1761,6 +2058,7 @@ function newAssistantChat() {
     title: partyLabel(state.activeParty) + " Chat " + (visible.length + 1),
     party: state.activeParty,
     badge: "grey",
+    caseContext: { country: "", orderType: "", channel: "" },
     messages: [],
     createdAt: new Date().toISOString()
   };
@@ -1792,18 +2090,53 @@ function setCustomerBadge(b) {
   renderAssistantModalBody();
 }
 
-function buildAssistantSystemPrompt(queryForRelevance, party, badge) {
+function setChatCaseContext(dim, value) {
+  const chat = getActiveAssistantChat();
+  if (!chat) return;
+  if (!chat.caseContext) chat.caseContext = { country: "", orderType: "", channel: "" };
+  chat.caseContext[dim] = value;
+  save();
+  renderAssistantModalBody();
+}
+
+// Shared guardrail block — used everywhere the AI is expected to ground an
+// answer in policy, not just in the Assistant chat. Adapted from the
+// "precise compliance engine" framing: forbid invention, force literal step
+// adherence, and mandate an explicit refusal when nothing matches instead of
+// a confidently-worded guess.
+const STRICT_POLICY_ADHERENCE = `STRICT ADHERENCE RULES — these override general helpfulness:
+- When a matched policy gives numbered or sequential steps, follow them exactly and completely — don't skip, reorder, merge, or add steps that aren't there.
+- Don't invent details, actions, tools, amounts, or timeframes that aren't explicitly in the matched policy text.
+- If the matched policy says something like "no compensation" or "do not offer X", state that plainly and don't soften or override it.
+- If nothing matched covers this specific scenario, say plainly that you don't have a matching policy for it — then, only if useful, offer a clearly-labeled general best-practice suggestion to be verified. Never present a guess with the same confidence as a policy-grounded answer.`;
+
+function buildAssistantSystemPrompt(queryForRelevance, party, badge, caseContext) {
+  const ctx = caseContext || { country: "", orderType: "", channel: "" };
+  const setFacts = Object.keys(CASE_DIMENSIONS)
+    .filter(dim => ctx[dim])
+    .map(dim => `${dim}: ${CASE_DIMENSIONS[dim].find(o => o.value === ctx[dim])?.label || ctx[dim]}`);
+  const caseFactsNote = setFacts.length
+    ? `Known case facts (set explicitly by Mohammad, already used to filter the policy below to compatible branches only): ${setFacts.join(", ")}.`
+    : `No structured case facts (country/order type/channel) are set yet. If the matched policy below clearly branches on one of these and it matters for the answer, ask Mohammad to set it (in the dropdowns above the chat) rather than guessing which branch applies.`;
+
   return `${buildPersonaInstructions(party)}
 
 ${badgeNoteFor(badge)}
 
-Relevant ingested company policy for this section (highest-priority source of truth when it applies; may include a secondary policy from another section if nothing in this one matched):
-${policyContextFor(queryForRelevance, party)}
+${caseFactsNote}
+
+Relevant ingested company policy for this section (highest-priority source of truth when it applies; already filtered to exclude branches that contradict any case facts set above; may include a secondary policy from another section if nothing in this one matched):
+${policyContextFor(queryForRelevance, party, ctx, badge)}
 
 Relevant saved macros for this section (when one of these genuinely fits, base your reply on it and adapt/polish it for the specific situation rather than writing something unrelated from scratch — this keeps replies consistent with what's already approved. Only draft something fully original when nothing here fits):
 ${macroContextFor(queryForRelevance, party)}
 
-You're advising Mohammad, the agent (not the ${partyAudienceNoun(party)}), inside his internal macro tool. He may: paste a message and ask you to draft a reply; ask a direct factual question like "what contact reason should I use?" or "which hashtag fits this?", which you should answer with the specific short value itself, not a paragraph explaining how to find it; ask you to reason through a case; or paste an entire past chat and ask questions about it. Always ground answers in the policy above when it applies, and be exactly as certain as the policy actually lets you be, no more. If nothing above covers the question, you may give a general best-practice answer, but say plainly that it isn't policy-sourced so Mohammad knows to double-check it, rather than presenting a guess as certain. If you're missing a detail you'd need to answer confidently and correctly (e.g. "did the customer confirm the item was missing, or just late?"), ask ONE short clarifying question instead of guessing. Proactively mention required next steps you can see are implied by policy (logging the case, escalating, confirming a detail) even if Mohammad didn't explicitly ask. When you do give a reply meant for the ${partyAudienceNoun(party)}, write it entirely in their language, make it copy-paste-or-say-out-loud ready, and don't wrap it in commentary or labels.`;
+You're advising Mohammad, the agent (not the ${partyAudienceNoun(party)}), inside his internal macro tool. He may: paste a message and ask you to draft a reply; ask a direct factual question like "what contact reason should I use?" or "which hashtag fits this?", which you should answer with the specific short value itself, not a paragraph explaining how to find it; ask you to reason through a case; or paste an entire past chat and ask questions about it.
+
+${STRICT_POLICY_ADHERENCE}
+- If you're missing a detail you'd need to answer confidently and correctly (e.g. "did the customer confirm the item was missing, or just late?"), ask ONE short clarifying question instead of guessing.
+- Proactively mention required next steps you can see are implied by policy (logging the case, escalating, confirming a detail) even if Mohammad didn't explicitly ask.
+- When you do give a reply meant for the ${partyAudienceNoun(party)}, write it entirely in their language, make it copy-paste-or-say-out-loud ready, and don't wrap it in commentary or labels.`;
 }
 
 function openAiAssistant() {
@@ -1849,6 +2182,7 @@ function renderAssistantModalBody() {
     return;
   }
 
+  if (!chat.caseContext) chat.caseContext = { country: "", orderType: "", channel: "" };
   body.innerHTML = tabsHtml + `
     <div class="cust-badge-row" style="margin-top:12px">
       <button type="button" class="cust-badge-btn ${chat.badge==='grey'?'active':''}" onclick="setCustomerBadge('grey')">⚪ Grey (default)</button>
@@ -1856,6 +2190,7 @@ function renderAssistantModalBody() {
       <button type="button" class="cust-badge-btn ${chat.badge==='gold'?'active':''}" onclick="setCustomerBadge('gold')">⭐ Gold</button>
       <button type="button" class="cust-badge-btn ${chat.badge==='gold2'?'active':''}" onclick="setCustomerBadge('gold2')">⭐⭐ Gold</button>
     </div>
+    <div class="case-context-row">${caseContextSelectorsHtml(chat.caseContext, "setChatCaseContext")}</div>
     <div id="assistant-log" class="assistant-log"></div>
     <div class="assistant-input-row">
       <textarea id="assistant-input" rows="2" placeholder="Ask anything, or paste a message..." onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault(); sendAssistantMessage();}"></textarea>
@@ -1880,7 +2215,7 @@ function renderAssistantChat() {
   log.innerHTML = chat.messages.map(m => `
     <div class="chat-msg ${m.role}">
       <div class="chat-bubble">${escapeHtml(m.content)}</div>
-      ${m.role === "assistant" ? `<button class="btn sm ghost" onclick="navigator.clipboard.writeText(${JSON.stringify(m.content)}); toast('Copied')">📋 Copy</button>${toneButtonsHtml(m.content, null)}` : ""}
+      ${m.role === "assistant" ? `<button class="btn sm ghost" onclick="navigator.clipboard.writeText(${JSON.stringify(m.content)}); toast('Copied')">📋 Copy</button>${sourcesHtml(m.sources)}${toneButtonsHtml(m.content, null)}` : ""}
     </div>
   `).join("") || `<p style="color:var(--muted); font-size:12px">No messages yet — ask anything or paste a message above.</p>`;
   log.scrollTop = log.scrollHeight;
@@ -1897,11 +2232,14 @@ async function sendAssistantMessage() {
   input.value = "";
   save();
   renderAssistantChat();
-  const sys = buildAssistantSystemPrompt(msg, chat.party, chat.badge);
-  const messages = [{ role: "system", content: sys }, ...chat.messages.slice(-12)];
+  const sys = buildAssistantSystemPrompt(msg, chat.party, chat.badge, chat.caseContext);
+  // Strip any extra fields (like stored `sources`) before sending — the API
+  // only wants role/content.
+  const messages = [{ role: "system", content: sys }, ...chat.messages.slice(-12).map(m => ({ role: m.role, content: m.content }))];
   const reply = await aiChat(messages);
   if (reply) {
-    chat.messages.push({ role: "assistant", content: reply.trim() });
+    const sources = policySourcesFor(msg, chat.party, chat.caseContext, chat.badge);
+    chat.messages.push({ role: "assistant", content: reply.trim(), sources: sources.map(s => ({ id: s.id, title: s.title, policyCode: s.policyCode, path: s.path })) });
     save();
     renderAssistantChat();
   }
@@ -1914,7 +2252,7 @@ async function generateContactPacket() {
   if (!aiReady()) { aiNotReadyToast(); return; }
   box.innerHTML = '<p style="color:var(--muted); font-size:12px">Generating...</p>';
   const transcript = chat.messages.map(m => `${m.role === "user" ? "Agent" : "Assistant"}: ${m.content}`).join("\n");
-  const sys = buildAssistantSystemPrompt(transcript, chat.party, chat.badge);
+  const sys = buildAssistantSystemPrompt(transcript, chat.party, chat.badge, chat.caseContext);
   const prompt = `${sys}
 
 Existing categories already used internally in this section (folder/macro titles and policy names) — prefer reusing one of these verbatim for contactReason and/or hashtag when it genuinely fits the case, since consistent tagging matters for reporting. Only invent a new short one when nothing here fits, so Mohammad can tell it's a fresh suggestion he should double-check:

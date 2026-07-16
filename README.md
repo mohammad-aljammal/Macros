@@ -93,12 +93,36 @@ exactly that. Keep using the Settings fields instead.
 ### Policy Database
 
 **🧠 Ingest Policy** saves whatever you paste into a permanent policy
-database (visible/deletable in **⚙️ Settings → Policy Database**) that grounds
-every AI feature — it's checked first, and the AI falls back to general
-customer-service judgment only when nothing relevant is found. "Save & Generate
-Tree" additionally asks the AI to organize the policy into a logically nested
-folder/macro structure (sub-folders and sub-macros where the policy actually
-has sub-cases) and mirrors it into Arabic.
+database (visible/deletable/editable in **⚙️ Settings → Policy Database**)
+that grounds every AI feature — it's checked first, and the AI falls back to
+general customer-service judgment only when nothing relevant is found.
+"Save & Generate Tree" additionally asks the AI to organize the policy into a
+logically nested folder/macro structure and mirrors it into Arabic.
+
+**📥 Import Article (JSON)** — available in both the Ingest Policy modal and
+Settings — imports the chunked output of the Shelf article extractor
+(`extract_one_article.py`, in a separate script). Each decision-tree branch
+becomes its own precisely-scoped policy chunk instead of one giant free-text
+article, tagged with:
+- `conditions` — **hard** tags derived strictly from the actual branch
+  decisions taken (e.g. reaching a chunk via "Country: France" tags it
+  `country_fr`). Safe to filter on.
+- `mentioned` — **soft** tags from scanning the full body text. Useful for
+  ranking, but never used to exclude a chunk, since shared ancestor text
+  (a root paragraph every leaf inherits) can't reliably tell branches apart.
+
+**Structured case context** — Country / Order Type / Channel dropdowns (next
+to the badge selector, in both AI Scan and per-chat in AI Assistant) are
+explicitly set by you, not inferred from free text. When set, retrieval
+**hard-excludes** any chunk whose own branch conditions name a different
+value for that dimension — so a UK case can never be handed a France-only
+branch. If nothing compatible is found, it falls back to the section's full
+pool and says so, rather than silently returning nothing.
+
+**Source citations** — every AI answer grounded in policy shows which exact
+chunk(s) it used as clickable pills underneath. Click one to see the raw,
+unedited source text — so you can verify against the literal policy in two
+clicks instead of trusting the AI's paraphrase blindly.
 
 ### Customer Badges (internal only)
 
