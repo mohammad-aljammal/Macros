@@ -264,6 +264,8 @@
   .chat-bubble { padding: 8px 11px; border-radius: 10px; font-size: 13px; line-height: 1.45; white-space: pre-wrap; }
   .chat-msg.user .chat-bubble { background: rgba(110,168,254,0.18); border: 1px solid var(--accent); }
   .chat-msg.assistant .chat-bubble { background: var(--panel); border: 1px solid var(--border); }
+  .stream-cursor { animation: blink 1s step-start infinite; color: var(--accent); }
+  @keyframes blink { 50% { opacity: 0; } }
   .chat-msg .btn.sm.ghost { margin-top: 3px; padding: 2px 6px; font-size: 11px; }
   .assistant-input-row { display: flex; gap: 8px; align-items: flex-end; }
   .assistant-input-row textarea { flex: 1; resize: vertical; }
@@ -1276,28 +1278,33 @@ function openSettings() {
           <input type="file" id="article-json-input-settings" accept=".json" multiple />
           <button class="btn sm primary" onclick="importArticleJSON(document.getElementById('article-json-input-settings').files)">📥 Import Article JSON</button>
         </div>
-        ${groupedPolicyList().map(g => `
+        ${groupedPolicyList().map(g => {
+          const redirectCount = g.chunks.filter(p => p.leafType === "external_link").length;
+          return `
           <div class="policy-group">
             <div class="policy-group-header">
               ${g.policyCode ? `<span class="policy-code-badge">${escapeHtml(g.policyCode)}</span>` : ""}
               <b>${escapeHtml(g.article || g.chunks[0].title)}</b>
               <span style="color:var(--muted); font-size:11px">${g.chunks.length} chunk${g.chunks.length === 1 ? "" : "s"}</span>
+              ${redirectCount ? `<span class="cond-badge" style="color:var(--warn); border-color:var(--warn)" title="These paths redirect to other articles not yet imported">🔗 ${redirectCount} unresolved link${redirectCount === 1 ? "" : "s"}</span>` : ""}
             </div>
             ${g.chunks.map(p => `
               <div class="stat-row policy-chunk-row">
                 <span style="cursor:pointer; flex:1" onclick="openPolicyEditor('${p.id}')">
-                  ${p.party === "general" ? "🌐" : partyIcon(p.party)}
+                  ${p.leafType === "external_link" ? "🔗" : p.party === "general" ? "🌐" : partyIcon(p.party)}
                   ${escapeHtml(p.path && p.path.length ? p.path.map(x => x.a).filter(Boolean).join(" › ") : p.title)}
+                  ${p.leafType === "external_link" ? `<span class="cond-badge" style="color:var(--warn); border-color:var(--warn)">redirect — not imported</span>` : ""}
                   <span class="cond-badges">${(p.conditions || []).slice(0, 6).map(c => `<span class="cond-badge">${escapeHtml(c)}</span>`).join("")}</span>
                 </span>
                 <span style="display:flex; gap:4px">
+                  ${p.externalUrl ? `<a class="btn sm" href="${escapeHtml(p.externalUrl)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">🔗 Open Link</a>` : ""}
                   <button class="btn sm" onclick="openPolicyEditor('${p.id}')">Open</button>
                   <button class="btn sm danger" onclick="if(confirm('Delete this chunk?')) deletePolicy('${p.id}')">Delete</button>
                 </span>
               </div>
             `).join("")}
           </div>
-        `).join("") || '<p style="color:var(--muted); font-size:12px">No policies ingested yet — use 🧠 Ingest Policy.</p>'}
+        `;}).join("") || '<p style="color:var(--muted); font-size:12px">No policies ingested yet — use 🧠 Ingest Policy.</p>'}
       </div>
       <div class="card">
         <h4>📈 Velocity — Most Used</h4>
@@ -1406,6 +1413,13 @@ function addPolicyRecord(title, text, party = state.activeParty, extra) {
     if (extra.path) rec.path = extra.path;
     if (extra.conditions) rec.conditions = extra.conditions;
     if (extra.mentioned) rec.mentioned = extra.mentioned;
+    // leafType "external_link" marks a chunk that isn't real policy content —
+    // it's a dead-end that redirects the reader to a DIFFERENT article. Kept
+    // distinct so retrieval/display can flag it instead of treating it like
+    // normal ground-truth text.
+    if (extra.leafType) rec.leafType = extra.leafType;
+    if (extra.externalUrl) rec.externalUrl = extra.externalUrl;
+    if (extra.externalGemId) rec.externalGemId = extra.externalGemId;
   }
   state.policies.push(rec);
   save();
@@ -1422,7 +1436,8 @@ async function importArticleJSON(fileList) {
   const files = Array.from(fileList || []);
   if (!files.length) { toast("Choose at least one .json file first"); return; }
   const targetParty = document.getElementById("policy-party") ? document.getElementById("policy-party").value : state.activeParty;
-  let totalChunks = 0, totalArticles = 0;
+  let totalChunks = 0, totalArticles = 0, totalRedirects = 0;
+  const redirectGemIds = new Set();
   for (const file of files) {
     try {
       const raw = await file.text();
@@ -1453,9 +1468,16 @@ async function importArticleJSON(fileList) {
             url: art.url,
             path: normPath,
             conditions: ch.conditions || [],
-            mentioned: ch.mentioned || []
+            mentioned: ch.mentioned || [],
+            leafType: ch.leaf_type || null,
+            externalUrl: ch.externalUrl || null,
+            externalGemId: ch.externalGemId || null
           });
           totalChunks++;
+          if (ch.leaf_type === "external_link") {
+            totalRedirects++;
+            if (ch.externalGemId) redirectGemIds.add(ch.externalGemId);
+          }
         }
         totalArticles++;
       }
@@ -1465,7 +1487,9 @@ async function importArticleJSON(fileList) {
     }
   }
   save();
-  toast(`Imported ${totalArticles} article(s) → ${totalChunks} chunk(s) into ${partyLabel(targetParty)}`);
+  let msg = `Imported ${totalArticles} article(s) → ${totalChunks} chunk(s) into ${partyLabel(targetParty)}`;
+  if (totalRedirects) msg += `. ${totalRedirects} path(s) redirect to ${redirectGemIds.size} other article(s) not yet imported — see 🔗 badges in Policy Database.`;
+  toast(msg);
   closeModal();
   if (typeof openSettings === "function") openSettings();
 }
@@ -1487,12 +1511,19 @@ function openPolicyEditor(id) {
   const pathHtml = (p.path && p.path.length) ? `<div class="row"><label>Decision-tree path</label><div style="font-size:12px; color:var(--muted)">${p.path.map(x => escapeHtml(x.a || "")).filter(Boolean).join(" › ")}</div></div>` : "";
   const condHtml = (p.conditions && p.conditions.length) ? `<div class="row"><label>Hard conditions (from the actual branch — used to filter)</label><div class="cond-badges">${p.conditions.map(c => `<span class="cond-badge">${escapeHtml(c)}</span>`).join("")}</div></div>` : "";
   const mentionedHtml = (p.mentioned && p.mentioned.length) ? `<div class="row"><label>Mentioned in body (soft signal only, not used to filter)</label><div class="cond-badges">${p.mentioned.map(c => `<span class="cond-badge">${escapeHtml(c)}</span>`).join("")}</div></div>` : "";
+  const redirectBanner = p.leafType === "external_link" ? `
+    <div style="background:rgba(255,203,107,0.12); border:1px solid var(--warn); border-radius:8px; padding:10px 12px; margin-bottom:12px; font-size:12px">
+      🔗 <b>This is a redirect stub, not real policy content.</b> This path in the decision tree hands off to a different article that hasn't been imported yet.
+      ${p.externalUrl ? `<div style="margin-top:6px"><a href="${escapeHtml(p.externalUrl)}" target="_blank" rel="noopener" style="color:var(--accent)">Open the target article →</a></div>` : ""}
+      ${p.externalGemId ? `<div style="margin-top:2px; color:var(--muted)">gemId: ${escapeHtml(p.externalGemId)} — extract this separately and import it to fill in this branch.</div>` : ""}
+    </div>` : "";
   const modal = document.createElement("div");
   modal.className = "modal-backdrop";
   modal.innerHTML = `
     <div class="modal">
       <h3>📚 Policy: ${escapeHtml(p.title)}</h3>
       ${metaBits.length ? `<p style="color:var(--muted); font-size:12px; margin-top:-8px">${metaBits.join(" · ")}</p>` : ""}
+      ${redirectBanner}
       ${pathHtml}
       ${condHtml}
       ${mentionedHtml}
@@ -1667,18 +1698,34 @@ function getRelevantPolicies(query, max = 3, party = state.activeParty, caseCont
 // matched, so it reasons from general judgment instead of guessing at policy.
 // Flags any result pulled in from a DIFFERENT section so the AI treats it as
 // secondary, not as this section's own rule.
+// Total character budget for policy context injected into any single prompt.
+// Bigger prompts take genuinely longer to process (not just transmit) and
+// raise TPM risk — this keeps every call lean regardless of how long an
+// individual ingested policy chunk happens to be, without touching the
+// stored policy text itself (only the copy sent to the model gets trimmed).
+const POLICY_CONTEXT_CHAR_BUDGET = 4500;
+const MACRO_CONTEXT_CHAR_BUDGET = 2000;
+
 function policyContextFor(query, party = state.activeParty, caseContext = state.caseContext, badge = currentBadge) {
   const rel = getRelevantPolicies(query, 3, party, caseContext, badge);
   if (!rel.length) return "(No specific ingested policy matched this in any section — use sound general customer-service judgment, and say plainly that this isn't policy-sourced.)";
-  return rel.map(p => {
+  let budget = POLICY_CONTEXT_CHAR_BUDGET;
+  const parts = [];
+  for (const p of rel) {
+    if (budget <= 0) break;
     const scopeNote = p.party === party ? "" : p.party === "general" ? " (general, cross-section policy)" : ` (from the ${partyLabel(p.party)} section — no ${partyLabel(party)}-specific policy was found for this, so use with care and flag it as a secondary source)`;
     const crumbs = [];
     if (p.policyCode) crumbs.push(`[${p.policyCode}]`);
     if (p.article) crumbs.push(p.article);
     (p.path || []).forEach(x => { const a = (x && typeof x === "object") ? x.a : x; if (a) crumbs.push(a); });
     const header = crumbs.length ? crumbs.join(" › ") : p.title;
-    return `[Policy: ${header}${scopeNote}]\n${p.text}`;
-  }).join("\n\n");
+    const linkNote = p.leafType === "external_link" ? " — ⚠️ THIS IS A REDIRECT STUB, NOT REAL POLICY CONTENT. It marks a dead end where the real steps live in a different, not-yet-imported article." : "";
+    let text = p.text || "";
+    if (text.length > budget) text = text.slice(0, budget) + "\n[…truncated — open this policy in Settings for the full text]";
+    parts.push(`[Policy: ${header}${scopeNote}${linkNote}]\n${text}`);
+    budget -= text.length;
+  }
+  return parts.join("\n\n");
 }
 
 // Returns which exact chunks would ground a given query — used to show
@@ -1697,7 +1744,8 @@ function sourcesHtml(sources) {
   if (!sources || !sources.length) return "";
   return `<div class="source-pills">📄 Sources: ${sources.map(p => {
     const label = p.policyCode ? `[${p.policyCode}] ${p.path && p.path.length ? p.path[p.path.length-1].a : p.title}` : p.title;
-    return `<span class="source-pill" onclick="openPolicyEditor('${p.id}')">${escapeHtml(label.slice(0, 40))}</span>`;
+    const prefix = p.leafType === "external_link" ? "🔗 " : "";
+    return `<span class="source-pill" onclick="openPolicyEditor('${p.id}')" title="${p.leafType === 'external_link' ? 'Redirect stub — not real policy content' : ''}">${prefix}${escapeHtml(label.slice(0, 40))}</span>`;
   }).join("")}</div>`;
 }
 
@@ -1725,10 +1773,17 @@ function relevantMacrosFor(query, max = 4, party = state.activeParty) {
 function macroContextFor(query, party = state.activeParty) {
   const rel = relevantMacrosFor(query, 4, party);
   if (!rel.length) return "(No closely matching saved macro found in any section — draft an original reply consistent with the policy and persona instructions above.)";
-  return rel.map(m => {
+  let budget = MACRO_CONTEXT_CHAR_BUDGET;
+  const parts = [];
+  for (const m of rel) {
+    if (budget <= 0) break;
     const scopeNote = m._fromParty ? ` (from the ${partyLabel(m._fromParty)} section — use with care)` : "";
-    return `[Saved macro: ${m.path.join(" › ")} — ${m.node.label}${scopeNote}]\n${m.node.text}`;
-  }).join("\n\n");
+    let text = m.node.text || "";
+    if (text.length > budget) text = text.slice(0, budget) + "…";
+    parts.push(`[Saved macro: ${m.path.join(" › ")} — ${m.node.label}${scopeNote}]\n${text}`);
+    budget -= text.length;
+  }
+  return parts.join("\n\n");
 }
 
 // Existing folder/macro titles + policy titles, offered to the AI as reusable
@@ -1984,9 +2039,11 @@ async function aiDraftReply() {
   const box = document.getElementById("ai-scan-results");
   if (!msg) return;
   if (!aiReady()) { aiNotReadyToast(); return; }
-  box.innerHTML = '<p style="color:var(--muted); font-size:12px">Drafting...</p>';
+  box.innerHTML = `<div class="suggestion"><div class="path">AI Drafted Reply</div><div id="ai-scan-stream" style="white-space:pre-wrap">…</div></div>`;
+  const streamEl = document.getElementById("ai-scan-stream");
+  const updateStream = (text) => { if (streamEl) streamEl.textContent = text; };
   const prompt = `${buildPersonaInstructions()}\n\n${badgeNoteFor(currentBadge)}\n\nRelevant policy:\n${policyContextFor(msg)}\n\nRelevant saved macros (when one genuinely fits, adapt/polish it for this specific message rather than writing something unrelated from scratch; only draft fully original when nothing here fits):\n${macroContextFor(msg)}\n\n${STRICT_POLICY_ADHERENCE}\n\nCustomer message: "${msg}"\n\nWrite ONE best reply in the same language as the customer message. Use [brackets] for placeholders. Return only the reply text, no commentary.`;
-  const reply = await aiGenerate(prompt);
+  const reply = await aiGenerate(prompt, updateStream);
   if (!reply) {
     // aiGenerate/aiChat already toasted the specific error — don't render a
     // card that looks like a successful draft when nothing actually came back.
@@ -2108,6 +2165,7 @@ const STRICT_POLICY_ADHERENCE = `STRICT ADHERENCE RULES — these override gener
 - When a matched policy gives numbered or sequential steps, follow them exactly and completely — don't skip, reorder, merge, or add steps that aren't there.
 - Don't invent details, actions, tools, amounts, or timeframes that aren't explicitly in the matched policy text.
 - If the matched policy says something like "no compensation" or "do not offer X", state that plainly and don't soften or override it.
+- If a matched policy is marked as a REDIRECT STUB (not real content), don't invent what the other article probably says. Tell Mohammad plainly that this path leads to a separate article that hasn't been imported yet, and give him the link/name from the stub so he can open it himself or extract and import it.
 - If nothing matched covers this specific scenario, say plainly that you don't have a matching policy for it — then, only if useful, offer a clearly-labeled general best-practice suggestion to be verified. Never present a guess with the same confidence as a policy-grounded answer.`;
 
 function buildAssistantSystemPrompt(queryForRelevance, party, badge, caseContext) {
@@ -2128,10 +2186,7 @@ ${caseFactsNote}
 Relevant ingested company policy for this section (highest-priority source of truth when it applies; already filtered to exclude branches that contradict any case facts set above; may include a secondary policy from another section if nothing in this one matched):
 ${policyContextFor(queryForRelevance, party, ctx, badge)}
 
-Relevant saved macros for this section (when one of these genuinely fits, base your reply on it and adapt/polish it for the specific situation rather than writing something unrelated from scratch — this keeps replies consistent with what's already approved. Only draft something fully original when nothing here fits):
-${macroContextFor(queryForRelevance, party)}
-
-You're advising Mohammad, the agent (not the ${partyAudienceNoun(party)}), inside his internal macro tool. He may: paste a message and ask you to draft a reply; ask a direct factual question like "what contact reason should I use?" or "which hashtag fits this?", which you should answer with the specific short value itself, not a paragraph explaining how to find it; ask you to reason through a case; or paste an entire past chat and ask questions about it.
+You're advising Mohammad, the agent (not the ${partyAudienceNoun(party)}), inside his internal macro tool. He may: paste a message and ask you to draft a reply; ask a direct factual question like "what contact reason should I use?" or "which hashtag fits this?", which you should answer with the specific short value itself, not a paragraph explaining how to find it; ask you to reason through a case; or paste an entire past chat and ask questions about it. Write replies fresh, grounded in the policy above — don't assume or reference specific saved macros, since those aren't included here (Mohammad uses the separate AI Scan / Draft Reply panel when he specifically wants a matching saved macro).
 
 ${STRICT_POLICY_ADHERENCE}
 - If you're missing a detail you'd need to answer confidently and correctly (e.g. "did the customer confirm the item was missing, or just late?"), ask ONE short clarifying question instead of guessing.
@@ -2221,6 +2276,25 @@ function renderAssistantChat() {
   log.scrollTop = log.scrollHeight;
 }
 
+// Appends a live-updating "typing" bubble and returns a function that updates
+// its text as tokens stream in — this is what makes the reply visibly start
+// appearing within a second or two instead of the UI looking frozen for the
+// whole generation. Removed automatically once the real message is saved and
+// renderAssistantChat() runs again.
+function appendStreamingBubble() {
+  const log = document.getElementById("assistant-log");
+  if (!log) return () => {};
+  const emptyMsg = log.querySelector("p");
+  if (emptyMsg) emptyMsg.remove();
+  const wrap = document.createElement("div");
+  wrap.className = "chat-msg assistant streaming";
+  wrap.innerHTML = `<div class="chat-bubble"><span class="stream-text"></span><span class="stream-cursor">▍</span></div>`;
+  log.appendChild(wrap);
+  log.scrollTop = log.scrollHeight;
+  const textEl = wrap.querySelector(".stream-text");
+  return (text) => { textEl.textContent = text; log.scrollTop = log.scrollHeight; };
+}
+
 async function sendAssistantMessage() {
   const chat = getActiveAssistantChat();
   if (!chat) return;
@@ -2236,11 +2310,16 @@ async function sendAssistantMessage() {
   // Strip any extra fields (like stored `sources`) before sending — the API
   // only wants role/content.
   const messages = [{ role: "system", content: sys }, ...chat.messages.slice(-12).map(m => ({ role: m.role, content: m.content }))];
-  const reply = await aiChat(messages);
+  const updateBubble = appendStreamingBubble();
+  const reply = await aiChat(messages, updateBubble);
   if (reply) {
     const sources = policySourcesFor(msg, chat.party, chat.caseContext, chat.badge);
-    chat.messages.push({ role: "assistant", content: reply.trim(), sources: sources.map(s => ({ id: s.id, title: s.title, policyCode: s.policyCode, path: s.path })) });
+    chat.messages.push({ role: "assistant", content: reply.trim(), sources: sources.map(s => ({ id: s.id, title: s.title, policyCode: s.policyCode, path: s.path, leafType: s.leafType })) });
     save();
+    renderAssistantChat();
+  } else {
+    // aiChat already toasted the specific error — just clear the now-stale
+    // streaming bubble so it doesn't sit on screen with a stuck cursor.
     renderAssistantChat();
   }
 }
@@ -2509,23 +2588,28 @@ function queueAiCall(fn) {
 
 // Convenience wrapper for the many call sites that just want text back from a
 // single prompt string. Internally normalizes to the messages-based aiChat().
-async function aiGenerate(prompt) {
-  return aiChat([{ role: "user", content: prompt }]);
+async function aiGenerate(prompt, onToken) {
+  return aiChat([{ role: "user", content: prompt }], onToken);
 }
 
 // Unified entry point: messages = [{role: "system"|"user"|"assistant", content}]
-async function aiChat(messages) {
+// onToken (optional): called with the accumulated text so far as it streams in,
+// so a caller can render progressively instead of waiting for the full reply.
+// Every backend supports it; callers that don't pass it just get the final
+// text as before, unchanged.
+async function aiChat(messages, onToken) {
   const backendFn = state.aiBackend === "local" ? aiChatLocal
     : state.aiBackend === "openrouter" ? aiChatOpenRouter
     : aiChatGemini;
-  const out = await queueAiCall(() => backendFn(messages));
+  const wrappedOnToken = onToken ? (text) => onToken(sanitizeAiText(text)) : undefined;
+  const out = await queueAiCall(() => backendFn(messages, wrappedOnToken));
   return out ? sanitizeAiText(out) : out;
 }
 
 let lastGeminiCallAt = 0;
 const GEMINI_MIN_GAP_MS = 6500; // gemini-3.5-flash free tier is 10 RPM specifically — 4500ms (13.3 RPM) was still over that; this keeps ~9.2 RPM with margin
 
-async function aiChatGemini(messages) {
+async function aiChatGemini(messages, onToken) {
   if (!GEMINI_API_KEY) {
     toast("AI error: no Gemini API key set. Add one in ⚙️ Settings → AI (Gemini) Key.");
     return null;
@@ -2542,11 +2626,14 @@ async function aiChatGemini(messages) {
   const body = { contents };
   if (systemParts.length) body.systemInstruction = { parts: [{ text: systemParts.join("\n\n") }] };
 
+  // Streaming endpoint (SSE) — same request shape as generateContent, just a
+  // different path + alt=sse, and the response arrives as a sequence of
+  // partial-candidate JSON events instead of one final blob. This is what
+  // lets the AI Assistant / Draft Reply show text as it's generated instead
+  // of one long silent wait for the whole thing.
   let res;
   try {
-    // Auth keys (the "AQ." prefix) authenticate via the x-goog-api-key header,
-    // not the old "?key=" query param used by legacy AIza standard keys.
-    res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`, {
+    res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY },
       body: JSON.stringify(body)
@@ -2556,12 +2643,9 @@ async function aiChatGemini(messages) {
     toast("AI network error: " + (e.message || e) + ". Check your internet connection.");
     return null;
   }
-  let data;
-  try { data = await res.json(); } catch (e) {
-    toast("AI error: invalid response from Gemini (HTTP " + res.status + ").");
-    return null;
-  }
   if (!res.ok) {
+    let data = null;
+    try { data = await res.json(); } catch (e) {}
     const msg = data?.error?.message || ("HTTP " + res.status);
     const status = data?.error?.status ? " [" + data.error.status + "]" : "";
     console.error("Gemini API error", data);
@@ -2578,30 +2662,67 @@ async function aiChatGemini(messages) {
     else toast("AI error" + status + ": " + msg);
     return null;
   }
-  const candidate = data?.candidates?.[0];
-  const finishReason = candidate?.finishReason;
-  const text = candidate?.content?.parts?.[0]?.text || "";
+
+  let text = "";
+  let finishReason = null;
+  let blockReason = null;
+  try {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop(); // keep last (possibly partial) line for next chunk
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const jsonStr = line.slice(6).trim();
+        if (!jsonStr) continue;
+        try {
+          const evt = JSON.parse(jsonStr);
+          const piece = evt?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (piece) { text += piece; if (onToken) onToken(text); }
+          if (evt?.candidates?.[0]?.finishReason) finishReason = evt.candidates[0].finishReason;
+          if (evt?.promptFeedback?.blockReason) blockReason = evt.promptFeedback.blockReason;
+        } catch (e) { /* partial/malformed chunk — skip, next chunk will complete it */ }
+      }
+    }
+  } catch (e) {
+    console.error(e);
+    if (!text) { toast("AI streaming error: " + (e.message || e)); return null; }
+    // Partial text already streamed to the UI — keep it rather than discard.
+  }
+
   if (!text) {
     if (finishReason === "SAFETY") toast("AI error: response blocked by safety filters.");
     else if (finishReason === "MAX_TOKENS") toast("AI error: response truncated (MAX_TOKENS). Try a shorter prompt.");
     else if (finishReason === "RECITATION") toast("AI error: response blocked (RECITATION).");
-    else if (data?.promptFeedback?.blockReason) toast("AI error: prompt blocked — " + data.promptFeedback.blockReason);
+    else if (blockReason) toast("AI error: prompt blocked — " + blockReason);
     else toast("AI error: empty response" + (finishReason ? " (" + finishReason + ")" : "") + ".");
-    console.error("Gemini empty response", data);
     return null;
   }
   if (finishReason === "MAX_TOKENS") toast("Warning: AI response was truncated (MAX_TOKENS).");
   return text;
 }
 
-async function aiChatLocal(messages) {
+async function aiChatLocal(messages, onToken) {
   if (!localEngine) {
     toast("Local AI model not loaded. Go to ⚙️ Settings → AI Backend and click Load Model.");
     return null;
   }
+  const runStream = async (engine) => {
+    const stream = await engine.chat.completions.create({ messages, temperature: 0.7, stream: true });
+    let text = "";
+    for await (const chunk of stream) {
+      const piece = chunk?.choices?.[0]?.delta?.content;
+      if (piece) { text += piece; if (onToken) onToken(text); }
+    }
+    return text;
+  };
   try {
-    const res = await localEngine.chat.completions.create({ messages, temperature: 0.7 });
-    return res?.choices?.[0]?.message?.content || "";
+    return await runStream(localEngine);
   } catch (e) {
     console.error(e);
     const msg = String(e.message || e);
@@ -2618,8 +2739,7 @@ async function aiChatLocal(messages) {
           if (progEl) progEl.textContent = p.text || (Math.round((p.progress || 0) * 100) + "%");
         });
         toast("Local model reloaded — retrying now...");
-        const res = await localEngine.chat.completions.create({ messages, temperature: 0.7 });
-        return res?.choices?.[0]?.message?.content || "";
+        return await runStream(localEngine);
       } catch (e2) {
         console.error(e2);
         toast("Local AI error after reload attempt: " + (e2.message || e2) + ". Try clicking Load Local Model again in ⚙️ Settings.");
@@ -2631,7 +2751,7 @@ async function aiChatLocal(messages) {
   }
 }
 
-async function aiChatOpenRouter(messages) {
+async function aiChatOpenRouter(messages, onToken) {
   if (!OPENROUTER_API_KEY) {
     toast("AI error: no OpenRouter key set. Add one in ⚙️ Settings → AI Backend.");
     return null;
@@ -2653,19 +2773,16 @@ async function aiChatOpenRouter(messages) {
         "Content-Type": "application/json",
         "Authorization": "Bearer " + OPENROUTER_API_KEY
       },
-      body: JSON.stringify({ models: modelsList, messages })
+      body: JSON.stringify({ models: modelsList, messages, stream: true })
     });
   } catch (e) {
     console.error(e);
     toast("AI network error: " + (e.message || e) + ". Check your internet connection.");
     return null;
   }
-  let data;
-  try { data = await res.json(); } catch (e) {
-    toast("AI error: invalid response from OpenRouter (HTTP " + res.status + ").");
-    return null;
-  }
-  if (!res.ok || data.error) {
+  if (!res.ok) {
+    let data = null;
+    try { data = await res.json(); } catch (e) {}
     const msg = data?.error?.message || ("HTTP " + res.status);
     console.error("OpenRouter API error", data);
     if (res.status === 401) toast("AI error: invalid OpenRouter key. Check it in ⚙️ Settings.");
@@ -2674,16 +2791,45 @@ async function aiChatOpenRouter(messages) {
     else toast("AI error: " + msg);
     return null;
   }
-  const text = data?.choices?.[0]?.message?.content || "";
+
+  // OpenAI-compatible SSE stream: lines of "data: {json}", terminated by "data: [DONE]".
+  let text = "";
+  let modelUsed = null;
+  try {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const jsonStr = line.slice(6).trim();
+        if (!jsonStr || jsonStr === "[DONE]") continue;
+        try {
+          const evt = JSON.parse(jsonStr);
+          if (evt.model) modelUsed = evt.model;
+          const piece = evt?.choices?.[0]?.delta?.content;
+          if (piece) { text += piece; if (onToken) onToken(text); }
+        } catch (e) { /* partial/malformed chunk — skip, next chunk will complete it */ }
+      }
+    }
+  } catch (e) {
+    console.error(e);
+    if (!text) { toast("AI streaming error: " + (e.message || e)); return null; }
+  }
+
   if (!text) {
     toast("AI error: empty response from OpenRouter.");
-    console.error("OpenRouter empty response", data);
     return null;
   }
   // OpenRouter reports which model actually answered (relevant since
   // "openrouter/free" picks a different live model per call) — surface it
   // so "what model will it use" has a real, checkable answer, not just guesswork.
-  lastOpenRouterModelUsed = data?.model || null;
+  lastOpenRouterModelUsed = modelUsed;
   console.log("OpenRouter answered with:", lastOpenRouterModelUsed);
   const statusEl = document.getElementById("openrouter-last-model");
   if (statusEl && lastOpenRouterModelUsed) statusEl.textContent = "Last answered by: " + lastOpenRouterModelUsed;
