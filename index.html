@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Mohammad's Macro Playbook</title>
 <link rel="icon" href="favicon.ico" />
-<link rel="stylesheet" href="patches.css" />
 <style>
   :root {
     --bg: #0f1115;
@@ -458,53 +457,6 @@ let kbdFocusId = null;
 // (search-result clicks, AI match clicks, keyboard navigation).
 let pendingScrollToId = null;
 
-// -----------------------------------------------------------------------------
-// STORAGE LAYER — hybrid localStorage + IndexedDB
-// -----------------------------------------------------------------------------
-// The user's growing policy database (90+ articles, many chunks each) blew
-// past localStorage's ~5MB quota. Fix: keep the SMALL state (macros tree,
-// settings, favorites, mirror) in localStorage where synchronous access is
-// cheap and useful, and move the BIG state (policies, assistantChats) to
-// IndexedDB where quota is effectively unlimited. save() is unchanged
-// signature-wise — it fire-and-forgets the IDB writes; the reads happen
-// once at boot in bootstrapState() below.
-const IDB_NAME = "mohammad-macro-playbook-idb";
-const IDB_STORE = "big";
-const IDB_KEYS = { policies: "policies", chats: "assistantChats" };
-let __idbPromise = null;
-function idbOpen() {
-  if (__idbPromise) return __idbPromise;
-  __idbPromise = new Promise((resolve, reject) => {
-    if (!("indexedDB" in window)) return reject(new Error("IndexedDB not supported"));
-    const req = indexedDB.open(IDB_NAME, 1);
-    req.onupgradeneeded = () => { req.result.createObjectStore(IDB_STORE); };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-  return __idbPromise;
-}
-async function idbGet(key) {
-  try {
-    const db = await idbOpen();
-    return await new Promise((resolve, reject) => {
-      const tx = db.transaction(IDB_STORE, "readonly").objectStore(IDB_STORE).get(key);
-      tx.onsuccess = () => resolve(tx.result);
-      tx.onerror = () => reject(tx.error);
-    });
-  } catch (e) { console.warn("idbGet failed", key, e); return null; }
-}
-async function idbSet(key, val) {
-  try {
-    const db = await idbOpen();
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(IDB_STORE, "readwrite");
-      tx.objectStore(IDB_STORE).put(val, key);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
-  } catch (e) { console.warn("idbSet failed", key, e); }
-}
-
 function loadState() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -515,8 +467,15 @@ function loadState() {
       if (!parsed.aiBackend) parsed.aiBackend = "gemini";
       if (!parsed.localModelSize) parsed.localModelSize = "1.5b";
       if (!parsed.openRouterModels) parsed.openRouterModels = DEFAULT_OPENROUTER_MODELS;
+      // One-time repair: upgrade anyone still on the old broken default (which
+      // led with a paid model) to the corrected all-free default. Only touches
+      // it if untouched — anything you've customized yourself is left alone.
       else if (parsed.openRouterModels === OLD_DEFAULT_OPENROUTER_MODELS) parsed.openRouterModels = DEFAULT_OPENROUTER_MODELS;
 
+      // Migrate old single-section shape (state.trees.en/ar as flat arrays,
+      // state.mirror as a flat id map) into the new party-separated shape.
+      // Existing work goes under "customer" so nothing is lost; the other
+      // three sections start empty.
       if (parsed.trees && Array.isArray(parsed.trees.en)) {
         parsed.trees = {
           customer: { en: parsed.trees.en, ar: parsed.trees.ar || [] },
@@ -527,33 +486,19 @@ function loadState() {
         parsed.mirror = { customer: parsed.mirror || {}, rider: {}, partner: {}, calls: {} };
       }
       if (!parsed.activeParty || !PARTIES.includes(parsed.activeParty)) parsed.activeParty = "customer";
+      // Old policies had no section tag — "general" means "checked from every
+      // section" rather than assuming they only belonged to one.
       parsed.policies.forEach(p => { if (!p.party) p.party = "general"; });
       if (!parsed.assistantChats) parsed.assistantChats = [];
       if (typeof parsed.activeAssistantChatId === "undefined") parsed.activeAssistantChatId = null;
+      // Structured case facts for AI Scan/Draft Reply (global — that panel
+      // isn't per-chat). AI Assistant carries the same shape per-chat instead.
       if (!parsed.caseContext) parsed.caseContext = { country: "", orderType: "", channel: "" };
-      // Country scope: user currently handles UAE + Kuwait only. UK/EU chunks
-      // are auto-excluded from AI retrieval unless the user re-enables them
-      // in Settings → Country Scope. This is a soft filter — the raw policies
-      // remain saved so nothing is lost when he's moved to another region.
-      if (!parsed.enabledCountries) parsed.enabledCountries = { uk:false, ie:false, fr:false, it:false, ae:true, kw:true, qa:false };
-      // Migrate legacy gold2 badge to gold (unified per user request).
-      if (parsed.assistantChats) parsed.assistantChats.forEach(c => { if (c.badge === "gold2") c.badge = "gold"; });
-      // Legacy usage counters are no longer displayed but kept in state for
-      // backup compatibility — new code just ignores them.
-      if (!parsed.usage) parsed.usage = {};
-      // Keyboard shortcuts: { macroId: "shift+alt+g" }
-      if (!parsed.shortcuts) parsed.shortcuts = {};
-      // Per-chat unsent draft, so a refresh or window-close doesn't lose typing.
-      if (!parsed.chatDrafts) parsed.chatDrafts = {};
-      // Contact-reason / cancellation reference articles — anchor articles the
-      // retriever always includes to keep contact-reason/tag generation deterministic.
-      if (!parsed.anchorArticleIds) parsed.anchorArticleIds = { contactReason: null, cancellation: null };
       return parsed;
     }
-  } catch (e) { console.error(e); }
+  } catch (e) {}
   return defaultState();
 }
-
 
 function defaultState() {
   const uid = () => Math.random().toString(36).slice(2, 10);
@@ -626,43 +571,7 @@ function defaultState() {
   };
 }
 
-let __saveTimer = null;
-let __idbSaveTimer = null;
-function save() {
-  // Split what goes where. The BIG blobs (policies, assistantChats) get
-  // written to IndexedDB out-of-band; the small everyday state stays in
-  // localStorage so bootstrap remains fast.
-  const small = {};
-  for (const k in state) {
-    if (k === "policies" || k === "assistantChats") continue;
-    small[k] = state[k];
-  }
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(small));
-  } catch (e) {
-    // Quota (should be very rare once big stuff moved to IDB). Try one more
-    // time after dropping non-essential fields.
-    if (e && e.name === "QuotaExceededError") {
-      try {
-        const trimmed = { ...small, usage: {}, chatDrafts: {} };
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed));
-        if (typeof toast === "function") toast("Local storage was full — cleared usage stats to make room. Your policies are safe in IndexedDB.");
-      } catch (e2) {
-        console.error("Storage save failed even after trimming", e2);
-        if (typeof toast === "function") toast("Could not save to localStorage. Try clearing browser data for this site.");
-      }
-    } else {
-      console.error(e);
-    }
-  }
-  // Coalesce rapid successive IDB writes into one — big blobs shouldn't be
-  // rewritten twice per keystroke.
-  if (__idbSaveTimer) clearTimeout(__idbSaveTimer);
-  __idbSaveTimer = setTimeout(() => {
-    idbSet(IDB_KEYS.policies, state.policies);
-    idbSet(IDB_KEYS.chats, state.assistantChats);
-  }, 120);
-}
+function save() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 /* ============================================================
@@ -1020,11 +929,11 @@ function renderCenter() {
   }
 
   // Macro view
-  const usage = 0; // usage counter removed from UI per request
+  const usage = state.usage[node.id] || 0;
   el.innerHTML = `
     <div class="macro-view">
       <h2>📝 ${escapeHtml(node.label)} ${colorDot}</h2>
-      <div class="breadcrumb">${escapeHtml(crumbs)} <span class="badge">Macro</span></div>
+      <div class="breadcrumb">${escapeHtml(crumbs)} <span class="badge">Macro</span> <span class="badge">Used ${usage}×</span></div>
       <div class="toolbar">
         <button class="btn primary" onclick="copyMacro()">📋 Copy</button>
         <button class="tone-btn" onclick="rewriteTone('empathetic')">💗 Empathetic</button>
@@ -1398,14 +1307,9 @@ function openSettings() {
         `;}).join("") || '<p style="color:var(--muted); font-size:12px">No policies ingested yet — use 🧠 Ingest Policy.</p>'}
       </div>
       <div class="card">
-        <h4>⌨️ Keyboard Shortcuts</h4>
-        <p style="color:var(--muted); font-size:12px; margin:0 0 8px">Assign a shortcut (Shift+Alt+Key) to any macro to paste it instantly to the clipboard. Great for greetings and holders.</p>
-        <div id="shortcuts-panel"><em style="color:var(--muted); font-size:12px">Loading…</em></div>
+        <h4>📈 Velocity — Most Used</h4>
+        ${usageEntries.slice(0,10).map(e => `<div class="stat-row"><span>${escapeHtml(e.label)}</span><span class="count">${e.count}×</span></div>`).join('') || '<p style="color:var(--muted); font-size:12px">No usage data yet.</p>'}
       </div>
-      <div class="card">
-        <h4>🌍 Country Scope</h4>
-        <p style="color:var(--muted); font-size:12px; margin:0 0 8px">Policies contain UK/EU/UAE/KW/QA branches. Turn a country OFF to have the AI ignore those branches during retrieval, keeping answers focused on the regions you actually handle. Nothing is deleted — just filtered.</p>
-        <div id="country-scope-row"></div>
       <div class="card">
         <h4>💾 Backup & Restore</h4>
         <p style="color:var(--muted); font-size:12px; margin:0 0 8px">Export all sections, macros, favorites, usage, and settings as a JSON file. Restore from a previously exported file.</p>
@@ -1534,31 +1438,7 @@ async function importArticleJSON(fileList) {
   const targetParty = document.getElementById("policy-party") ? document.getElementById("policy-party").value : state.activeParty;
   let totalChunks = 0, totalArticles = 0, totalRedirects = 0;
   const redirectGemIds = new Set();
-
-  // Progress bar so multi-article imports don't look like the UI is hung.
-  const progressHost = document.getElementById("import-progress-host") || (() => {
-    // Fallback: append below whichever import button was clicked.
-    const host = document.createElement("div");
-    host.id = "import-progress-host";
-    host.style.cssText = "margin-top:10px";
-    (document.querySelector(".modal") || document.body).appendChild(host);
-    return host;
-  })();
-  progressHost.innerHTML = `<div class="import-progress"><div class="import-progress-bar"><div class="import-progress-fill" style="width:0%"></div></div><div class="import-progress-label">Starting import…</div></div>`;
-  const fillEl = progressHost.querySelector(".import-progress-fill");
-  const labelEl = progressHost.querySelector(".import-progress-label");
-  const setProgress = (i, name) => {
-    const pct = Math.round((i / files.length) * 100);
-    if (fillEl) fillEl.style.width = pct + "%";
-    if (labelEl) labelEl.textContent = `Importing ${i}/${files.length} — ${name}`;
-  };
-  // Yield to the browser so the UI paints between files.
-  const yieldToUi = () => new Promise(r => setTimeout(r, 0));
-
-  for (let i = 0; i < files.length; i++) {
-    const file = files[i];
-    setProgress(i, file.name);
-    await yieldToUi();
+  for (const file of files) {
     try {
       const raw = await file.text();
       const parsed = JSON.parse(raw);
@@ -1568,6 +1448,8 @@ async function importArticleJSON(fileList) {
         const articleName = art.article || file.name.replace(/\.json$/i, "");
         const articleId = art.gemId || uid();
         if (art.gemId) {
+          // Replace this article's existing chunks (any section) so a
+          // re-export after the source changed doesn't leave stale branches.
           state.policies = state.policies.filter(p => p.articleId !== art.gemId);
         }
         for (const ch of art.chunks) {
@@ -1589,12 +1471,7 @@ async function importArticleJSON(fileList) {
             mentioned: ch.mentioned || [],
             leafType: ch.leaf_type || null,
             externalUrl: ch.externalUrl || null,
-            externalGemId: ch.externalGemId || null,
-            summary: ch.summary || null,
-            resolutionSteps: ch.resolution_steps || null,
-            contactReasonHint: ch.contact_reason || null,
-            tagHint: ch.tag || null,
-            articleType: art.article_type || null
+            externalGemId: ch.externalGemId || null
           });
           totalChunks++;
           if (ch.leaf_type === "external_link") {
@@ -1609,13 +1486,10 @@ async function importArticleJSON(fileList) {
       toast(`Failed to import ${file.name}: ${e.message}`);
     }
   }
-  setProgress(files.length, "done");
   save();
   let msg = `Imported ${totalArticles} article(s) → ${totalChunks} chunk(s) into ${partyLabel(targetParty)}`;
   if (totalRedirects) msg += `. ${totalRedirects} path(s) redirect to ${redirectGemIds.size} other article(s) not yet imported — see 🔗 badges in Policy Database.`;
   toast(msg);
-  // Small delay so the user sees "100%" before the modal reflow.
-  await new Promise(r => setTimeout(r, 250));
   closeModal();
   if (typeof openSettings === "function") openSettings();
 }
@@ -2057,38 +1931,45 @@ function linkMirrors(en, ar) {
 // audience noun so the AI doesn't address a rider or restaurant like a customer.
 function buildPersonaInstructions(party = state.activeParty) {
   const audience = partyAudienceNoun(party);
-  const isPhone = party === "calls" || party === "partner";
-  const base = `You are helping Mohammad, a customer service agent at Deliveroo, currently working the ${partyLabel(party)} section. You communicate like a top-tier bilingual support agent AND a skilled empathetic psychologist: you read the ${audience}'s emotional state precisely (frustrated, worried, embarrassed, disappointed, calm), you name and validate that feeling briefly and genuinely without being performative, and you always steer toward a resolution or, when there is none, toward acknowledgment that itself feels like care. Your CSAT is the north star, even when no compensation or fix is possible the ${audience} should feel heard, respected, and treated as an individual. Use the ${audience}'s NAME naturally when it strengthens warmth (a greeting, a reassurance, a difficult message), but never in every sentence and never in a mechanical formula. Match the ${audience}'s language exactly. Company policy given below is the highest-priority source of truth; if this section's own policy doesn't cover it you may draw on another section's policy as secondary, and only fall back to general judgment if nothing fits, saying so plainly. When writing in Arabic, use natural professional Modern Standard Arabic the way a well-trained bilingual support agent actually writes it, not stiff literal translation and not casual slang.`;
-  const mediumNote = isPhone
-    ? `\n\nMohammad is currently LIVE ON A ${party === "partner" ? "PARTNER PHONE CALL" : "PHONE CALL"} with a ${audience}, this is SPOKEN not written. Give him short natural sentences he can say out loud immediately, no bullet points, no markdown, no "Dear", no unfilled [bracket] placeholders (ask him for the missing detail, or phrase naturally like "your order"). If he also needs to take an action state that separately from the words to actually speak.`
-    : `\n\nThis is a LIVE CHAT message, not an email. Never write a subject line, "Dear [Name],", or an email sign-off/signature. Keep it short and conversational.`;
-  const identityNote = `\n\nWhen natural, you can mention "Mohammad" and/or "Deliveroo" (e.g. a greeting or wrap-up), but don't force it into every message.`;
-  const styleNote = `\n\nNever use an em dash or en dash (— or –) anywhere; it reads AI-generated. Use a period, comma, or "and". Avoid AI writing tells: no stock openers like "I understand your frustration" as a reflex, no over-hedging, no filler. Be exactly as thorough as the situation needs.`;
+  const base = `You are helping Mohammad, a customer service agent at Deliveroo, currently working the ${partyLabel(party)} section. Tone: warm and human, never robotic or generic — friendly by default, and firm (while staying respectful) when policy requires holding a line. When writing in Arabic, use natural, professional Modern Standard Arabic the way a well-trained bilingual support agent actually writes it — not a stiff literal translation, not overly classical/formal, and not casual slang. Match whichever language the ${audience} used, if known. Company policy (given below, if any) is the highest-priority source of truth; if this section's own policies don't cover it, you may draw on another section's policy as a secondary source, and only fall back to general judgment if nothing fits anywhere — and say plainly when you're doing that rather than presenting a guess as certain.`;
+
+  const mediumNote = party === "calls"
+    ? `\n\nMohammad is currently LIVE ON A PHONE CALL with a ${audience} — this is spoken, not written. Give him short, natural sentences he can say out loud immediately: no bullet points, no markdown, no "Dear", no unfilled [bracket] placeholders (ask him for the missing detail instead of leaving a bracket, or phrase it naturally like "your order" if the exact value isn't known yet). If he also needs to take an action (e.g. issue a refund), state that separately and clearly from the words to actually speak.`
+    : `\n\nThis is a LIVE CHAT message, not an email. Never write a subject line, never open with "Dear [Name]," and never close with an email sign-off like "Best regards" or a signature block. Keep it short and conversational, the way a real chat reply reads.`;
+
+  const identityNote = `\n\nWhen it's natural for a line to reference who's replying or where from (e.g. a greeting or wrap-up), you can mention "Mohammad" and/or "Deliveroo" — but don't force it into every message.`;
+
+  const styleNote = `\n\nNever use an em dash or en dash (— or –) anywhere in the text; it reads as AI-generated. Use a period, comma, or "and" instead. Avoid other AI writing tells too: don't over-hedge, don't use stock phrases like "I understand your frustration" as a reflex opener, and don't pad with unnecessary filler. Be exactly as thorough as the situation needs and no more — don't burn length just to sound complete.`;
+
   return base + mediumNote + identityNote + styleNote;
 }
 
-// Safety-net cleanup applied to every AI response.
+// Safety-net cleanup applied to every AI response: strips dash characters the
+// model might still slip in despite the instruction above, since a prompt
+// instruction alone isn't 100% reliable.
 function sanitizeAiText(text) {
   if (!text) return text;
   return text.replace(/\s*[—–]\s*/g, ", ").replace(/,\s*,+/g, ",").replace(/,\s*\./g, ".").replace(/,\s*\n/g, "\n");
 }
 
-// Grey / Red / Gold classification. STRICTLY internal, the AI must never
-// mention or ask the ${audience} about it. Grey is the default and majority.
+// Grey/Red/Gold/Gold-2 customer classification. Internal only — never shown
+// or hinted to the customer. If a matched policy differentiates its guidance
+// by badge and none more specific than the default has been set, the AI is
+// told to ask rather than silently assume — see the "grey" note below.
 function badgeNoteFor(badge) {
-  const norm = badge === "gold2" ? "gold" : badge;
   return {
-    grey: "Customer badge (STRICTLY INTERNAL, NEVER mention to the customer, never ask them about it, never hint that a classification system exists): GREY — default/unclassified, most customers. Apply standard policy and standard tone.",
-    red: "Customer badge (STRICTLY INTERNAL, NEVER mention to the customer, never ask them about it, never hint that a classification system exists): RED — flagged internally for a history of abuse or bad-faith complaints. Apply policy strictly and minimally, no discretionary goodwill beyond what policy requires, stay professional and firm never cold.",
-    gold: "Customer badge (STRICTLY INTERNAL, NEVER mention to the customer, never ask them about it, never hint that a classification system exists): GOLD ⭐/⭐⭐ — valuable, low-complaint customer. Lean toward the more generous end of what policy allows, prioritize retention and warmth."
-  }[norm] || "";
+    grey: "Customer badge (internal only, NEVER mention to the customer): GREY — default/unclassified, which is most customers. Apply standard policy and standard tone. IMPORTANT: if the relevant policy above gives different guidance depending on customer classification, and nothing more specific than this default has been stated, ask Mohammad directly which classification applies (grey/red/gold/gold-2) before finalizing badge-dependent advice, rather than assuming grey is correct.",
+    red: "Customer badge (internal only, NEVER mention to the customer): RED — flagged internally for a history of abuse or bad-faith complaints. Apply policy strictly and minimally; do not offer discretionary goodwill beyond what policy requires. Stay professional and firm, not cold.",
+    gold: "Customer badge (internal only, NEVER mention to the customer): GOLD ⭐ — flagged internally as a valuable, low-complaint customer. Lean toward the more generous end of what policy allows, and prioritize retention and warmth.",
+    gold2: "Customer badge (internal only, NEVER mention to the customer): GOLD ⭐⭐ — flagged internally as a top-tier, highly valuable customer with an excellent history. Apply the most generous end of what policy allows, prioritize retention strongly, and treat the case as high-priority."
+  }[badge] || "";
 }
 function badgeShortLabel(badge) {
-  const norm = badge === "gold2" ? "gold" : badge;
-  return { grey: "⚪ Grey (default)", red: "🔴 Red", gold: "⭐ / ⭐⭐ Gold" }[norm] || badge;
+  return { grey: "⚪ Grey", red: "🔴 Red", gold: "⭐ Gold", gold2: "⭐⭐ Gold" }[badge] || badge;
 }
 
-// Badge used by AI Scan / Draft Reply (single global value).
+// Badge used by AI Scan / Draft Reply (single global value — that panel isn't
+// per-chat like the AI Assistant, so one active classification at a time).
 function setGlobalBadge(b) {
   currentBadge = b;
   renderGlobalBadgeRow();
@@ -2096,7 +1977,7 @@ function setGlobalBadge(b) {
 function renderGlobalBadgeRow() {
   const el = document.getElementById("global-badge-row");
   if (!el) return;
-  el.innerHTML = ["grey", "red", "gold"].map(b =>
+  el.innerHTML = ["grey", "red", "gold", "gold2"].map(b =>
     `<button type="button" class="cust-badge-btn${currentBadge === b ? " active" : ""}" onclick="setGlobalBadge('${b}')">${badgeShortLabel(b)}</button>`
   ).join("");
   const ctxEl = document.getElementById("global-case-context-row");
@@ -2281,14 +2162,11 @@ function setChatCaseContext(dim, value) {
 // adherence, and mandate an explicit refusal when nothing matches instead of
 // a confidently-worded guess.
 const STRICT_POLICY_ADHERENCE = `STRICT ADHERENCE RULES — these override general helpfulness:
-- The customer's BADGE (grey/red/gold) is an INTERNAL classification. NEVER mention it, hint at it, or ask the customer about it in ANY drafted reply. Never write "Could you share your badge" or "what tier are you". If a policy needs badge context you don't have, silently apply grey (default).
-- Never ask the customer for their ORDER NUMBER, ORDER ID, or booking reference in a drafted reply. Mohammad is a live agent with the order details already open in front of him; the ONLY exception is when the case has no order attached (a general inquiry from a customer whose current chat is not tied to an order) and policy explicitly requires one. Even then, ask only once, briefly.
-- Do not ask for the customer's name, phone, email, or address unless the matched policy explicitly requires it and Mohammad hasn't already been given it.
-- When a matched policy gives numbered or sequential steps, follow them exactly — don't skip, reorder, merge, or add steps.
-- Don't invent details, actions, tools, amounts, or timeframes not explicitly in the matched policy text.
-- If the matched policy says "no compensation" or "do not offer X", state that plainly and don't soften or override it.
-- If a matched policy is a REDIRECT STUB (not real content), tell Mohammad plainly and give him the link/name so he can extract and import that article.
-- If nothing matched covers the scenario, say plainly you don't have a matching policy — then, only if useful, offer a clearly-labeled general best-practice suggestion to be verified. Never present a guess with the same confidence as a policy-grounded answer.`;
+- When a matched policy gives numbered or sequential steps, follow them exactly and completely — don't skip, reorder, merge, or add steps that aren't there.
+- Don't invent details, actions, tools, amounts, or timeframes that aren't explicitly in the matched policy text.
+- If the matched policy says something like "no compensation" or "do not offer X", state that plainly and don't soften or override it.
+- If a matched policy is marked as a REDIRECT STUB (not real content), don't invent what the other article probably says. Tell Mohammad plainly that this path leads to a separate article that hasn't been imported yet, and give him the link/name from the stub so he can open it himself or extract and import it.
+- If nothing matched covers this specific scenario, say plainly that you don't have a matching policy for it — then, only if useful, offer a clearly-labeled general best-practice suggestion to be verified. Never present a guess with the same confidence as a policy-grounded answer.`;
 
 function buildAssistantSystemPrompt(queryForRelevance, party, badge, caseContext) {
   const ctx = caseContext || { country: "", orderType: "", channel: "" };
@@ -2296,29 +2174,22 @@ function buildAssistantSystemPrompt(queryForRelevance, party, badge, caseContext
     .filter(dim => ctx[dim])
     .map(dim => `${dim}: ${CASE_DIMENSIONS[dim].find(o => o.value === ctx[dim])?.label || ctx[dim]}`);
   const caseFactsNote = setFacts.length
-    ? `Known case facts (set explicitly by Mohammad, already used to filter policy to compatible branches): ${setFacts.join(", ")}.`
-    : `No structured case facts (country/order type/channel) are set yet. If the matched policy branches on one of these and it matters, ask Mohammad to set it in the dropdowns above the chat rather than guessing.`;
-
-  // Auto-detect: is what Mohammad just pasted a customer-facing message
-  // itself (his shortcut for "give me a reply to this")? Prompt the model to
-  // recognize that pattern and skip the "would you like me to draft a reply?"
-  // meta-question — jump straight to writing the reply.
-  const shortcutNote = `\n\nSHORTCUT INTERPRETATION: If Mohammad pastes what looks like a customer's message (a complaint, question, or update phrased in first person by the customer, with no accompanying instruction), treat it as an implicit "draft a reply to this". Do NOT ask "would you like me to draft a reply?" — go straight to the reply, grounded in the policy above. If Mohammad instead asks you a factual question or asks you to reason about a case, answer that directly without drafting a customer-facing reply.`;
+    ? `Known case facts (set explicitly by Mohammad, already used to filter the policy below to compatible branches only): ${setFacts.join(", ")}.`
+    : `No structured case facts (country/order type/channel) are set yet. If the matched policy below clearly branches on one of these and it matters for the answer, ask Mohammad to set it (in the dropdowns above the chat) rather than guessing which branch applies.`;
 
   return `${buildPersonaInstructions(party)}
 
 ${badgeNoteFor(badge)}
 
 ${caseFactsNote}
-${shortcutNote}
 
 Relevant ingested company policy for this section (highest-priority source of truth when it applies; already filtered to exclude branches that contradict any case facts set above; may include a secondary policy from another section if nothing in this one matched):
 ${policyContextFor(queryForRelevance, party, ctx, badge)}
 
-You're advising Mohammad, the agent (not the ${partyAudienceNoun(party)}), inside his internal macro tool. He may: paste a message and ask you to draft a reply (or paste it alone as the shortcut above); ask a direct factual question like "what contact reason should I use?" or "which hashtag fits this?" — answer with the specific short value itself, not a paragraph; ask you to reason through a case; or paste an entire past chat and ask about it. Write replies fresh, grounded in the policy above.
+You're advising Mohammad, the agent (not the ${partyAudienceNoun(party)}), inside his internal macro tool. He may: paste a message and ask you to draft a reply; ask a direct factual question like "what contact reason should I use?" or "which hashtag fits this?", which you should answer with the specific short value itself, not a paragraph explaining how to find it; ask you to reason through a case; or paste an entire past chat and ask questions about it. Write replies fresh, grounded in the policy above — don't assume or reference specific saved macros, since those aren't included here (Mohammad uses the separate AI Scan / Draft Reply panel when he specifically wants a matching saved macro).
 
 ${STRICT_POLICY_ADHERENCE}
-- If you're missing a detail you'd need to answer confidently (e.g. "was the item missing, or just late?"), ask ONE short clarifying question, but ONLY to Mohammad (never phrased as if the customer will read it), and never about badge or order number.
+- If you're missing a detail you'd need to answer confidently and correctly (e.g. "did the customer confirm the item was missing, or just late?"), ask ONE short clarifying question instead of guessing.
 - Proactively mention required next steps you can see are implied by policy (logging the case, escalating, confirming a detail) even if Mohammad didn't explicitly ask.
 - When you do give a reply meant for the ${partyAudienceNoun(party)}, write it entirely in their language, make it copy-paste-or-say-out-loud ready, and don't wrap it in commentary or labels.`;
 }
@@ -2329,14 +2200,12 @@ function openAiAssistant() {
   modal.className = "modal-backdrop";
   modal.id = "assistant-modal";
   modal.innerHTML = `
-    <div class="modal modal-lg assistant-modal-container">
-      <div class="assistant-sticky-header">
-        <h3 style="margin:0">🤖 AI Assistant, ${partyIcon(state.activeParty)} ${escapeHtml(partyLabel(state.activeParty))}</h3>
-        <button class="btn ghost assistant-close-btn" onclick="closeModal()" title="Close (Esc)">✕</button>
-      </div>
-      <p style="color:var(--muted); font-size:12px; margin:4px 0 8px">
-        Ask anything, or paste a customer message and I'll draft a reply (grounded in this section's policies first).
-        Badges are internal, never shown to the ${escapeHtml(partyAudienceNoun(state.activeParty))}.
+    <div class="modal modal-lg">
+      <h3>🤖 AI Assistant — ${partyIcon(state.activeParty)} ${escapeHtml(partyLabel(state.activeParty))}</h3>
+      <p style="color:var(--muted); font-size:12px; margin-top:-6px">
+        Ask anything, or paste a message and ask for a reply. Grounded in this section's policies first, others as backup.
+        The badge is internal-only — never shown or hinted to the ${escapeHtml(partyAudienceNoun(state.activeParty))}.
+        Open multiple chats for multiple cases at once; close any when you're done.
       </p>
       <div id="assistant-body"></div>
     </div>
@@ -2368,36 +2237,30 @@ function renderAssistantModalBody() {
     return;
   }
 
-  if (chat.badge === "gold2") chat.badge = "gold";
-  const draft = (state.chatDrafts && state.chatDrafts[chat.id]) || "";
+  if (!chat.caseContext) chat.caseContext = { country: "", orderType: "", channel: "" };
   body.innerHTML = tabsHtml + `
     <div class="cust-badge-row" style="margin-top:12px">
       <button type="button" class="cust-badge-btn ${chat.badge==='grey'?'active':''}" onclick="setCustomerBadge('grey')">⚪ Grey (default)</button>
       <button type="button" class="cust-badge-btn ${chat.badge==='red'?'active':''}" onclick="setCustomerBadge('red')">🔴 Red</button>
-      <button type="button" class="cust-badge-btn ${chat.badge==='gold'?'active':''}" onclick="setCustomerBadge('gold')">⭐ / ⭐⭐ Gold</button>
+      <button type="button" class="cust-badge-btn ${chat.badge==='gold'?'active':''}" onclick="setCustomerBadge('gold')">⭐ Gold</button>
+      <button type="button" class="cust-badge-btn ${chat.badge==='gold2'?'active':''}" onclick="setCustomerBadge('gold2')">⭐⭐ Gold</button>
     </div>
     <div class="case-context-row">${caseContextSelectorsHtml(chat.caseContext, "setChatCaseContext")}</div>
     <div id="assistant-log" class="assistant-log"></div>
     <div class="assistant-input-row">
-      <textarea id="assistant-input" rows="2" placeholder="Ask anything, or paste a customer message to get an instant reply..." oninput="saveChatDraft(this.value)" onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault(); sendAssistantMessage();}">${escapeHtml(draft)}</textarea>
-      <button class="btn primary" id="assistant-send-btn" onclick="sendAssistantMessage()">Send</button>
+      <textarea id="assistant-input" rows="2" placeholder="Ask anything, or paste a message..." onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault(); sendAssistantMessage();}"></textarea>
+      <button class="btn primary" onclick="sendAssistantMessage()">Send</button>
     </div>
     <div class="modal-actions" style="justify-content:space-between; margin-top:12px">
       <button class="btn ghost" onclick="if(confirm('Clear messages in this chat?')){ const c=getActiveAssistantChat(); if(c){c.messages=[]; save();} renderAssistantModalBody(); }">Clear Messages</button>
-      <button class="btn" onclick="generateContactPacket()">📋 Generate Contact Reason / Log / Hashtag</button>
+      <div style="display:flex; gap:8px">
+        <button class="btn" onclick="generateContactPacket()">📋 Generate Contact Reason / Log / Hashtag</button>
+        <button class="btn ghost" onclick="closeModal()">Close</button>
+      </div>
     </div>
     <div id="contact-packet-results" style="margin-top:10px"></div>
   `;
   renderAssistantChat();
-}
-
-function saveChatDraft(text) {
-  const chat = getActiveAssistantChat();
-  if (!chat) return;
-  if (!state.chatDrafts) state.chatDrafts = {};
-  if (text) state.chatDrafts[chat.id] = text;
-  else delete state.chatDrafts[chat.id];
-  save();
 }
 
 function renderAssistantChat() {
@@ -2441,23 +2304,22 @@ async function sendAssistantMessage() {
   if (!aiReady()) { aiNotReadyToast(); return; }
   chat.messages.push({ role: "user", content: msg });
   input.value = "";
-  if (state.chatDrafts) delete state.chatDrafts[chat.id];
-  const sendBtn = document.getElementById("assistant-send-btn");
-  if (sendBtn) { sendBtn.disabled = true; sendBtn.textContent = "Thinking…"; }
   save();
   renderAssistantChat();
   const sys = buildAssistantSystemPrompt(msg, chat.party, chat.badge, chat.caseContext);
+  // Strip any extra fields (like stored `sources`) before sending — the API
+  // only wants role/content.
   const messages = [{ role: "system", content: sys }, ...chat.messages.slice(-12).map(m => ({ role: m.role, content: m.content }))];
   const updateBubble = appendStreamingBubble();
-  try {
-    const reply = await aiChat(messages, updateBubble);
-    if (reply) {
-      const sources = policySourcesFor(msg, chat.party, chat.caseContext, chat.badge);
-      chat.messages.push({ role: "assistant", content: reply.trim(), sources: sources.map(s => ({ id: s.id, title: s.title, policyCode: s.policyCode, path: s.path, leafType: s.leafType })) });
-      save();
-    }
-  } finally {
-    if (sendBtn) { sendBtn.disabled = false; sendBtn.textContent = "Send"; }
+  const reply = await aiChat(messages, updateBubble);
+  if (reply) {
+    const sources = policySourcesFor(msg, chat.party, chat.caseContext, chat.badge);
+    chat.messages.push({ role: "assistant", content: reply.trim(), sources: sources.map(s => ({ id: s.id, title: s.title, policyCode: s.policyCode, path: s.path, leafType: s.leafType })) });
+    save();
+    renderAssistantChat();
+  } else {
+    // aiChat already toasted the specific error — just clear the now-stale
+    // streaming bubble so it doesn't sit on screen with a stuck cursor.
     renderAssistantChat();
   }
 }
@@ -2534,12 +2396,11 @@ async function rewriteToneFor(text, tone, sourceNodeId) {
 }
 
 async function aiRewriteFromIntentFor(sourceNodeId) {
-  const intent = window.prompt("Describe the intent (e.g. 'push back about cancellation policy'):");
+  const intent = prompt("Describe the intent (e.g. 'push back about cancellation policy'):");
   if (!intent) return;
   if (!aiReady()) { aiNotReadyToast(); return; }
-  toast("Drafting…");
-  const promptText = `${buildPersonaInstructions()}\n\nWrite a customer service reply for this intent: ${intent}\n\nRelevant policy:\n${policyContextFor(intent)}\n\nRelevant saved macros (adapt one if it fits, otherwise write fresh but stay consistent with tone/policy):\n${macroContextFor(intent)}\n\n${STRICT_POLICY_ADHERENCE}\n\nUse [brackets] for placeholders. Return only the reply, no commentary.`;
-  const draft = await aiGenerate(promptText);
+  const prompt = `${buildPersonaInstructions()}\n\nWrite a customer service reply for this intent: ${intent}\n\nRelevant policy:\n${policyContextFor(intent)}\n\nRelevant saved macros (adapt one if it fits, otherwise write fresh but stay consistent with their tone/policy):\n${macroContextFor(intent)}\n\nUse [brackets] for placeholders. Return only the reply, no commentary.`;
+  const draft = await aiGenerate(prompt);
   if (draft) presentAiRewriteResult(`AI Draft: ${intent.slice(0, 40)}`, draft.trim(), sourceNodeId);
 }
 
@@ -3108,38 +2969,7 @@ document.querySelectorAll("#lang-toggle button").forEach(b => {
 });
 document.getElementById("search").addEventListener("input", renderTree);
 
-// Async bootstrap: hydrate big blobs from IndexedDB before first paint so
-// nothing rendered from stale-empty state, then render.
-(async function bootstrap() {
-  try {
-    const [pol, chats] = await Promise.all([idbGet(IDB_KEYS.policies), idbGet(IDB_KEYS.chats)]);
-    if (Array.isArray(pol) && pol.length) state.policies = pol;
-    if (Array.isArray(chats)) state.assistantChats = chats;
-    // One-time migration: if user still has policies+chats stuck in
-    // localStorage from before this build, move them to IDB and free the space.
-    if (!pol || !pol.length) {
-      try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        if (raw) {
-          const legacy = JSON.parse(raw);
-          if (legacy && Array.isArray(legacy.policies) && legacy.policies.length) {
-            state.policies = legacy.policies;
-            await idbSet(IDB_KEYS.policies, state.policies);
-          }
-          if (legacy && Array.isArray(legacy.assistantChats) && legacy.assistantChats.length) {
-            state.assistantChats = legacy.assistantChats;
-            await idbSet(IDB_KEYS.chats, state.assistantChats);
-          }
-          // Rewrite localStorage without the moved blobs.
-          save();
-        }
-      } catch (e) { console.warn("Legacy migration skipped", e); }
-    }
-  } catch (e) { console.warn("IDB bootstrap failed", e); }
-  render();
-  if (window.__initPatches) try { window.__initPatches(); } catch (e) { console.error(e); }
-})();
+render();
 </script>
-<script src="patches.js"></script>
 </body>
 </html>
